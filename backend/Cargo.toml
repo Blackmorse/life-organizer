@@ -1,0 +1,17 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+[dev-dependencies]
+serde_json = "1"
+testcontainers = "0.25"
+tower = { version = "0.5", features = ["util"] }
