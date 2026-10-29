@@ -1,26 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, AuthorizationError } from '../api'
-import type { Category, DailyTask, Subtask, Task, TaskInput } from '../types'
+import type { Category, DailyTask, Subtask, Task, TaskInput, ScheduledTask, ScheduledTaskInput, ScheduledOccurrence } from '../types'
 
 export function useWorkspace() {
   const [categories, setCategories] = useState<Category[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [dailyTasks, setDailyTasks] = useState<DailyTask[]>([])
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([])
+  const [scheduledDaily, setScheduledDaily] = useState<ScheduledOccurrence[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [authorizationRequired, setAuthorizationRequired] = useState(false)
   const [revision, setRevision] = useState(0)
   const mutationInFlight = useRef(false)
+  const mutationVersion = useRef(0)
 
   useEffect(() => {
     const controller = new AbortController()
-    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal)])
-      .then(([nextCategories, nextTasks, nextDailyTasks]) => {
+    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal), api.listScheduledTasks(controller.signal), api.listScheduledDaily(controller.signal)])
+      .then(([nextCategories, nextTasks, nextDailyTasks, nextScheduled, nextScheduledDaily]) => {
         if (controller.signal.aborted) return
         setCategories(nextCategories)
         setTasks(nextTasks)
         setDailyTasks(nextDailyTasks.filter((item) => item.expires_at > Date.now()))
+        setScheduledTasks(nextScheduled)
+        setScheduledDaily(nextScheduledDaily.filter((item) => item.expires_at > Date.now()))
         setAuthorizationRequired(false)
       })
       .catch((cause: unknown) => {
@@ -36,8 +41,11 @@ export function useWorkspace() {
   }, [revision])
 
   useEffect(() => {
-    function expire() { setDailyTasks((items) => items.filter((item) => item.expires_at > Date.now())) }
-    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at))
+    function expire() {
+      setDailyTasks((items) => items.filter((item) => item.expires_at > Date.now()))
+      setScheduledDaily((items) => items.filter((item) => item.expires_at > Date.now()))
+    }
+    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at))
     const timer = Number.isFinite(nextExpiry) ? window.setTimeout(expire, Math.max(0, nextExpiry - Date.now())) : undefined
     window.addEventListener('focus', expire)
     document.addEventListener('visibilitychange', expire)
@@ -46,11 +54,43 @@ export function useWorkspace() {
       window.removeEventListener('focus', expire)
       document.removeEventListener('visibilitychange', expire)
     }
-  }, [dailyTasks])
+  }, [dailyTasks, scheduledDaily])
+
+  useEffect(() => {
+    if (loading || authorizationRequired) return
+    const controller = new AbortController()
+    let pending = false
+    async function syncScheduled() {
+      if (pending || mutationInFlight.current || document.visibilityState === 'hidden') return
+      pending = true
+      const version = mutationVersion.current
+      try {
+        const items = await api.listScheduledDaily(controller.signal)
+        if (!controller.signal.aborted && !mutationInFlight.current && version === mutationVersion.current) {
+          setScheduledDaily(items.filter((item) => item.expires_at > Date.now()))
+        }
+      } catch (cause) {
+        if (!controller.signal.aborted) {
+          setError(errorMessage(cause))
+          setAuthorizationRequired(cause instanceof AuthorizationError)
+        }
+      } finally { pending = false }
+    }
+    const interval = window.setInterval(() => void syncScheduled(), 30_000)
+    window.addEventListener('focus', syncScheduled)
+    document.addEventListener('visibilitychange', syncScheduled)
+    return () => {
+      controller.abort()
+      window.clearInterval(interval)
+      window.removeEventListener('focus', syncScheduled)
+      document.removeEventListener('visibilitychange', syncScheduled)
+    }
+  }, [loading, authorizationRequired])
 
   async function mutate(operation: () => Promise<void>): Promise<boolean> {
     if (mutationInFlight.current || loading || authorizationRequired) return false
     mutationInFlight.current = true
+    mutationVersion.current++
     setSaving(true)
     setError(null)
     try {
@@ -86,8 +126,38 @@ export function useWorkspace() {
     }
   }
 
+  async function scheduledProgress(operation: () => Promise<ScheduledOccurrence[]>) {
+    const next = await operation()
+    setScheduledDaily(next)
+    const changed = next.some((item) => {
+      const previous = scheduledDaily.find((pick) => pick.id === item.id)
+      return previous && (previous.completed !== item.completed || JSON.stringify(previous.subtasks) !== JSON.stringify(item.subtasks))
+    })
+    if (!changed) return
+    try { await api.finalizeDailyTasks() } catch (cause) {
+      setError(`Progress saved, but the Telegram summary could not be sent. ${errorMessage(cause)} Use Finalize tasks to resend the current list.`)
+      setAuthorizationRequired(cause instanceof AuthorizationError)
+    }
+  }
+
   return {
-    categories, tasks, dailyTasks, loading, saving, error, authorizationRequired,
+    categories, tasks, dailyTasks, scheduledTasks, scheduledDaily, loading, saving, error, authorizationRequired,
+    saveScheduledTask: (input: ScheduledTaskInput, id?: number) => mutate(async () => {
+      const task = await api.saveScheduledTask(input, id)
+      setScheduledTasks((items) => id === undefined ? [...items, task] : items.map((item) => item.id === id ? task : item))
+      try { setScheduledDaily(await api.listScheduledDaily()) } catch (cause) {
+        setError(`Schedule saved, but today’s occurrences could not be refreshed. ${errorMessage(cause)} Use Refresh to reload.`)
+        setAuthorizationRequired(cause instanceof AuthorizationError)
+      }
+    }),
+    deleteScheduledTask: (id: number) => mutate(async () => {
+      await api.deleteScheduledTask(id)
+      setScheduledTasks((items) => items.filter((item) => item.id !== id))
+      setScheduledDaily((items) => items.filter((item) => item.scheduled_task_id !== id))
+    }),
+    completeScheduledDaily: (id: number, completed: boolean) => mutate(() => scheduledProgress(() => api.completeScheduledDaily(id, completed))),
+    replaceScheduledDailySubtasks: (id: number, steps: Subtask[]) => mutate(() => scheduledProgress(() => api.replaceScheduledDailySubtasks(id, steps))),
+    dismissScheduledDaily: (id: number) => mutate(async () => { setScheduledDaily(await api.dismissScheduledDaily(id)) }),
     finalizeDailyTasks: () => mutate(async () => { await api.finalizeDailyTasks() }),
     selectDailyTask: (id: number, index?: number) => mutate(async () => {
       const picks = await api.selectDailyTask(id, index)

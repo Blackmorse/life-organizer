@@ -1,4 +1,4 @@
-import type { Category, DailyTask, Subtask, Task, TaskInput } from './types'
+import type { Category, DailyTask, Subtask, Task, TaskInput, ScheduledTask, ScheduledTaskInput, ScheduledOccurrence } from './types'
 import { getTelegramInitData } from './telegram'
 
 export class AuthorizationError extends Error {}
@@ -42,6 +42,13 @@ async function request<T>(path: string, method = 'GET', body?: unknown, signal?:
 }
 
 export const api = {
+  listScheduledTasks: (signal?: AbortSignal) => request<ScheduledTask[]>('/scheduled-tasks', 'GET', undefined, signal),
+  saveScheduledTask: (input: ScheduledTaskInput, id?: number) => request<ScheduledTask>(id === undefined ? '/scheduled-tasks' : `/scheduled-tasks/${id}`, id === undefined ? 'POST' : 'PUT', input),
+  deleteScheduledTask: (id: number) => request<void>(`/scheduled-tasks/${id}`, 'DELETE'),
+  listScheduledDaily: (signal?: AbortSignal) => request<ScheduledOccurrence[]>('/scheduled-tasks/daily', 'GET', undefined, signal),
+  completeScheduledDaily: (id: number, completed: boolean) => request<ScheduledOccurrence[]>(`/scheduled-tasks/daily/${id}/completion`, 'PUT', { completed }),
+  replaceScheduledDailySubtasks: (id: number, subtasks: Subtask[]) => request<ScheduledOccurrence[]>(`/scheduled-tasks/daily/${id}/subtasks`, 'PUT', { subtasks }),
+  dismissScheduledDaily: (id: number) => request<ScheduledOccurrence[]>(`/scheduled-tasks/daily/${id}`, 'DELETE'),
   finalizeDailyTasks: () => request<void>('/daily-tasks/finalize', 'POST'),
   listDailyTasks: (signal?: AbortSignal) => request<DailyTask[]>('/daily-tasks', 'GET', undefined, signal),
   selectDailyTask: (task_id: number, subtask_index?: number) => request<DailyTask[]>('/daily-tasks', 'POST', {

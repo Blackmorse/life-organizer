@@ -33,6 +33,7 @@ pub trait MorningBot: Send + Sync {
 }
 
 pub struct MorningWorker {
+    pool: PgPool,
     store: MorningStore,
     bot: Arc<dyn MorningBot>,
 }
@@ -40,12 +41,14 @@ pub struct MorningWorker {
 impl MorningWorker {
     pub fn new(pool: PgPool, bot: Arc<dyn MorningBot>) -> Self {
         Self {
+            pool: pool.clone(),
             store: MorningStore::new(pool),
             bot,
         }
     }
 
     pub async fn deliver_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        crate::dao::generate_scheduled(&self.pool, None).await?;
         self.store.sweep().await?;
         // Bound each batch so callbacks remain responsive even with a backlog.
         for _ in 0..20 {

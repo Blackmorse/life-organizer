@@ -1,8 +1,10 @@
 mod category;
 mod daily;
 pub mod morning;
+mod scheduled;
 mod task;
 mod user;
+pub use scheduled::{PgScheduledDao, ScheduledDao, generate_scheduled};
 
 pub use category::{CategoryDao, PgCategoryDao};
 pub use daily::{DailyDao, PgDailyDao};

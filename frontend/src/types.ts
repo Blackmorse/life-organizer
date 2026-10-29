@@ -28,3 +28,21 @@ export interface DailyTask {
   subtask_id: string
   expires_at: number
 }
+
+export interface ScheduledTaskInput {
+  description: string
+  weekdays: number[]
+  timezone: string
+  subtasks: Subtask[]
+}
+
+export interface ScheduledTask extends ScheduledTaskInput { id: number }
+
+export interface ScheduledOccurrence {
+  id: number
+  scheduled_task_id: number
+  description: string
+  subtasks: Subtask[]
+  completed: boolean
+  expires_at: number
+}

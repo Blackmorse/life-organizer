@@ -11,8 +11,8 @@ use serde_json::json;
 
 use crate::{
     auth::AuthError,
-    dao::{PgCategoryDao, PgDailyDao, PgTaskDao, PgUserDao},
-    service::{CategoryService, DailyService, ServiceError, TaskService},
+    dao::{PgCategoryDao, PgDailyDao, PgScheduledDao, PgTaskDao, PgUserDao},
+    service::{CategoryService, DailyService, ScheduledService, ServiceError, TaskService},
 };
 
 use super::{AppState, Workspace};
@@ -55,6 +55,10 @@ pub async fn authenticate(
         Err(error) => return ServiceError::from(error).into_response(),
     };
     request.extensions_mut().insert(Workspace {
+        scheduled: ScheduledService::new(Arc::new(PgScheduledDao::new(
+            state.pool.clone(),
+            user.id,
+        ))),
         daily: DailyService::new(Arc::new(PgDailyDao::new(state.pool.clone(), user.id))),
         categories: CategoryService::new(Arc::new(PgCategoryDao::new(state.pool.clone(), user.id))),
         tasks: TaskService::new(Arc::new(PgTaskDao::new(state.pool.clone(), user.id))),

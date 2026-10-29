@@ -1,6 +1,33 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledTaskInput {
+    pub description: String,
+    pub weekdays: Vec<i16>,
+    pub timezone: String,
+    #[serde(default)]
+    pub subtasks: Vec<Subtask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledTask {
+    pub id: i64,
+    #[serde(flatten)]
+    pub details: ScheduledTaskInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledOccurrence {
+    pub id: i64,
+    pub scheduled_task_id: i64,
+    pub description: String,
+    pub subtasks: Vec<Subtask>,
+    pub completed: bool,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
     pub telegram_id: i64,

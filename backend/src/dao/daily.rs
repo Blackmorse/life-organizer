@@ -30,9 +30,10 @@ impl PgDailyDao {
 #[async_trait]
 impl DailyDao for PgDailyDao {
     async fn summary(&self) -> Result<Vec<DailyTaskSummary>, DaoError> {
-        let rows: Vec<(i64, String, String, Option<String>, bool)> = sqlx::query_as(
+        super::generate_scheduled(&self.pool, Some(self.user_id)).await?;
+        let rows: Vec<(i64, String, String, Option<String>, bool, i64)> = sqlx::query_as(
             "SELECT t.id, c.description, t.description, s.step->>'description',
-                t.completed OR COALESCE((s.step->>'completed')::boolean, false)
+                t.completed OR COALESCE((s.step->>'completed')::boolean, false), COALESCE(s.position, 0)
              FROM daily_tasks d
              JOIN tasks t ON t.id = d.task_id
              JOIN categories c ON c.id = t.category_id
@@ -43,7 +44,11 @@ impl DailyDao for PgDailyDao {
              ) s ON true
              WHERE c.user_id = $1 AND d.expires_at > statement_timestamp()
                  AND (d.subtask_id = '' OR s.step IS NOT NULL)
-             ORDER BY t.id, COALESCE(s.position, 0)",
+             UNION ALL
+             SELECT -o.id, '', o.description, NULL, o.completed, 0::bigint
+             FROM scheduled_occurrences o JOIN scheduled_tasks st ON st.id=o.scheduled_task_id
+             WHERE st.user_id=$1 AND NOT o.hidden AND o.expires_at > statement_timestamp()
+             ORDER BY 1, 6",
         )
         .bind(self.user_id)
         .fetch_all(&self.pool)
@@ -51,7 +56,7 @@ impl DailyDao for PgDailyDao {
         Ok(rows
             .into_iter()
             .map(
-                |(task_id, category, task, subtask, completed)| DailyTaskSummary {
+                |(task_id, category, task, subtask, completed, _)| DailyTaskSummary {
                     task_id,
                     category,
                     task,

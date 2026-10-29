@@ -3,13 +3,16 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { AppTheme } from './theme'
-import type { Category, DailyTask, Subtask, Task } from './types'
+import type { Category, DailyTask, Subtask, Task, ScheduledTask, ScheduledOccurrence } from './types'
 
 // Component-level tests run the real client and hook against a fake HTTP boundary.
 function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) {
   let categories = [...initialCategories]
   let tasks = [...initialTasks]
   let daily: DailyTask[] = []
+  let scheduled: ScheduledTask[] = []
+  let occurrences: ScheduledOccurrence[] = []
+  const skipped = new Set<number>()
   let nextId = 100
   const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
     expect(new Headers(options?.headers).get('Authorization')).toBe('tma signed-test-init-data')
@@ -17,6 +20,44 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) 
     const [, , resource, rawId, child] = url.split('/')
     const id = Number(rawId)
     const input = options?.body ? JSON.parse(String(options.body)) : undefined
+    if (resource === 'scheduled-tasks') {
+      if (rawId === 'daily') {
+        if (method === 'GET') {
+          for (const task of scheduled) {
+            if (!skipped.has(task.id) && !occurrences.some((item) => item.scheduled_task_id === task.id)) occurrences.push({
+              id: nextId++, scheduled_task_id: task.id, description: task.description,
+              subtasks: task.subtasks.map((step) => ({ ...step, completed: false })), completed: false, expires_at: Date.now() + 86_400_000,
+            })
+          }
+        }
+        const occurrenceId = Number(child)
+        if (method === 'PUT') occurrences = occurrences.map((item) => item.id !== occurrenceId ? item : input.subtasks
+          ? { ...item, subtasks: input.subtasks, completed: input.subtasks.length > 0 && input.subtasks.every((step: Subtask) => step.completed) }
+          : { ...item, completed: input.completed })
+        if (method === 'DELETE') {
+          const item = occurrences.find((item) => item.id === occurrenceId)!
+          skipped.add(item.scheduled_task_id)
+          occurrences = occurrences.filter((item) => item.id !== occurrenceId)
+        }
+        return Response.json(occurrences)
+      }
+      if (method === 'GET') return Response.json(scheduled)
+      if (method === 'POST') {
+        const task = { ...input, id: nextId++ }
+        scheduled.push(task)
+        return Response.json(task, { status: 201 })
+      }
+      if (method === 'PUT') {
+        const task = { ...input, id }
+        scheduled = scheduled.map((item) => item.id === id ? task : item)
+        return Response.json(task)
+      }
+      if (method === 'DELETE') {
+        scheduled = scheduled.filter((item) => item.id !== id)
+        occurrences = occurrences.filter((item) => item.scheduled_task_id !== id)
+        return new Response(null, { status: 204 })
+      }
+    }
     if (resource === 'daily-tasks') {
       if (rawId === 'finalize' && method === 'POST') return new Response(null, { status: 204 })
       daily = daily.filter((item) => item.expires_at > Date.now())
@@ -93,6 +134,68 @@ describe('workspace', () => {
     await user.click(await screen.findByRole('menuitem', { name: action }))
   }
 
+  it('creates required weekday schedules, edits future details, and tracks/skips today independently', async () => {
+    const fetchMock = mockApi()
+    const user = userEvent.setup()
+    renderWorkspace()
+    await screen.findByText('Your workspace is empty')
+    await user.click(screen.getByRole('tab', { name: 'Scheduled tasks' }))
+    await user.click(screen.getByRole('button', { name: 'Add scheduled task' }))
+    await user.type(screen.getByRole('textbox', { name: 'Scheduled task description' }), 'Sport exercises')
+    expect(screen.queryByRole('combobox', { name: 'Urgency' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save schedule' })).toBeDisabled()
+    for (const day of ['Monday', 'Wednesday', 'Friday']) await user.click(screen.getByRole('checkbox', { name: day }))
+    await user.click(screen.getByRole('button', { name: 'Add subtask' }))
+    expect(screen.getByRole('button', { name: 'Save schedule' })).toBeDisabled()
+    await user.type(screen.getByRole('textbox', { name: 'Subtask description' }), 'Warm up')
+    await user.click(screen.getByRole('button', { name: 'Save subtask' }))
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await screen.findByRole('button', { name: 'View scheduled task Sport exercises' })
+    const create = fetchMock.mock.calls.find(([url, options]) => url === '/api/scheduled-tasks' && options?.method === 'POST')!
+    const payload = JSON.parse(String(create[1]?.body))
+    expect(payload.weekdays).toEqual([1, 3, 5])
+    expect(payload).not.toHaveProperty('category_id')
+    expect(payload).not.toHaveProperty('urgency')
+    expect(payload.subtasks).toEqual([{ description: 'Warm up', completed: false }])
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    await user.click(screen.getByRole('button', { name: 'View daily scheduled task Sport exercises' }))
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('checkbox', { name: 'Subtask 1: Warm up' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Subtask 1: Warm up' })).not.toBeChecked()
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/daily-tasks/finalize')).toBe(false)
+    await user.click(screen.getByRole('checkbox', { name: 'Subtask 1: Warm up' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Sport exercises' })).toBeChecked()
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/daily-tasks/finalize')).toBe(true)
+    await user.click(screen.getByRole('tab', { name: 'Scheduled tasks' }))
+    await user.click(screen.getByRole('button', { name: 'View scheduled task Sport exercises' }))
+    await user.click(screen.getByRole('button', { name: 'Edit schedule' }))
+    const description = screen.getByRole('textbox', { name: 'Scheduled task description' })
+    await user.clear(description)
+    await user.type(description, 'New exercises')
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(description).toHaveValue('New exercises')
+    await user.click(screen.getByRole('button', { name: 'Save schedule' }))
+    await screen.findByRole('button', { name: 'View scheduled task New exercises' })
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Sport exercises' })).toBeChecked()
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Sport exercises' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Sport exercises' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Sport exercises' }))
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Sport exercises' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Sport exercises' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Scheduled tasks' }))
+    await user.click(screen.getByRole('button', { name: 'View scheduled task New exercises' }))
+    await user.click(screen.getByRole('button', { name: 'Delete scheduled task' }))
+    expect(await screen.findByText('No scheduled tasks yet.')).toBeInTheDocument()
+  })
+
   it('finalizes all daily picks regardless of search, disables duplicate sends, and keeps list editable', async () => {
     const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
       { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [] },
@@ -122,6 +225,29 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
     expect(button).toBeDisabled()
     expect(screen.queryByText("Today's tasks sent to your Telegram bot chat.")).not.toBeInTheDocument()
+  })
+
+  it('clears expired scheduled occurrences on resume even while refresh is stalled', async () => {
+    const fetchMock = mockApi()
+    const handleRequest = fetchMock.getMockImplementation()!
+    const occurrence: ScheduledOccurrence = {
+      id: 1, scheduled_task_id: 1, description: 'Daily exercise',
+      subtasks: [], completed: false, expires_at: Date.now() + 60_000,
+    }
+    fetchMock.mockImplementation((url, options) => url === '/api/scheduled-tasks/daily'
+      ? Promise.resolve(Response.json([occurrence])) : handleRequest(url, options))
+    const user = userEvent.setup()
+    renderWorkspace()
+    await screen.findByText('Your workspace is empty')
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Daily exercise' })).toBeInTheDocument()
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(() => {}))
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(occurrence.expires_at + 1)
+    try {
+      fireEvent.focus(window)
+      expect(screen.queryByRole('checkbox', { name: 'Complete daily Daily exercise' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeDisabled()
+    } finally { clock.mockRestore() }
   })
 
   it('shows bot start and delivery guidance on finalize failures, preserving picks for retry', async () => {

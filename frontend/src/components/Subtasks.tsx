@@ -8,14 +8,20 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import type { Subtask } from '../types'
 import { DailyPickButton } from './DailyTasks'
 
-export function Subtasks({ taskId, subtasks, disabled, readOnly = false, onSave }: {
+export function Subtasks({ taskId, subtasks, disabled, readOnly = false, mode = 'task', onSave, onEditingChange }: {
   taskId: number
   subtasks: Subtask[]
   disabled: boolean
   readOnly?: boolean
+  mode?: 'task' | 'template' | 'occurrence'
+  onEditingChange?: (editing: boolean) => void
   onSave: (steps: Subtask[]) => Promise<boolean>
 }) {
-  const [draft, setDraft] = useState<{ index: number | null, description: string } | null>(null)
+  const [draft, updateDraft] = useState<{ index: number | null, description: string } | null>(null)
+  function setDraft(next: typeof draft) {
+    updateDraft(next)
+    onEditingChange?.(next !== null)
+  }
   const actionsDisabled = disabled || draft !== null
 
   function move(index: number, offset: number) {
@@ -43,8 +49,8 @@ export function Subtasks({ taskId, subtasks, disabled, readOnly = false, onSave 
 
   return <Box component="section" aria-label="Subtasks" sx={{ mt: 2 }}>
     <Typography variant="h3" sx={{ mb: 1 }}>Subtasks</Typography>
-    {subtasks.length > 0 && <Typography variant="caption" color="text.secondary">{subtasks.filter((step) => step.completed).length} of {subtasks.length} completed</Typography>}
-    {!readOnly && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>Completing every subtask moves this task to Archive.</Typography>}
+    {subtasks.length > 0 && mode !== 'template' && <Typography variant="caption" color="text.secondary">{subtasks.filter((step) => step.completed).length} of {subtasks.length} completed</Typography>}
+    {!readOnly && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{mode === 'template' ? 'Each scheduled day starts with unchecked subtasks.' : mode === 'occurrence' ? 'Completing every subtask completes today’s occurrence only.' : 'Completing every subtask moves this task to Archive.'}</Typography>}
     {subtasks.length ? <Box component="ol" role="list" sx={{ pl: 0, my: 1, listStyle: 'none', counterReset: 'subtask' }}>
       {subtasks.map((step, index) => <Box component="li" key={index} sx={{
         mb: 0.5, display: 'grid', gridTemplateColumns: '3ch minmax(0, 1fr)', columnGap: 0.5, counterIncrement: 'subtask',
@@ -53,11 +59,11 @@ export function Subtasks({ taskId, subtasks, disabled, readOnly = false, onSave 
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
           {!readOnly && draft?.index === index ? editor : <FormControlLabel label={step.description} sx={{ flex: 1, minWidth: 0, m: 0, alignItems: 'flex-start' }}
             slotProps={{ typography: { variant: 'body2', sx: { pt: '9px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textDecoration: step.completed ? 'line-through' : undefined } } }}
-            control={<Checkbox size="small" checked={step.completed} disabled={actionsDisabled || readOnly}
+            control={<Checkbox size="small" checked={step.completed} disabled={actionsDisabled || readOnly || mode === 'template'}
               slotProps={{ input: { 'aria-label': `Subtask ${index + 1}: ${step.description}` } }}
               onChange={(_, completed) => void onSave(subtasks.map((item, position) => position === index ? { ...item, completed } : item))} />} />}
           {!readOnly && <Stack direction="row" sx={{ flexShrink: 0 }}>
-            <DailyPickButton taskId={taskId} step={step} index={index} label={step.description} disabled={actionsDisabled} />
+            {mode === 'task' && <DailyPickButton taskId={taskId} step={step} index={index} label={step.description} disabled={actionsDisabled} />}
             <IconButton size="small" aria-label={`Move subtask ${index + 1} up`} disabled={actionsDisabled || index === 0} onClick={() => move(index, -1)}><ArrowUpwardIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Move subtask ${index + 1} down`} disabled={actionsDisabled || index === subtasks.length - 1} onClick={() => move(index, 1)}><ArrowDownwardIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Edit subtask ${index + 1}`} disabled={actionsDisabled} onClick={() => setDraft({ index, description: step.description })}><EditOutlinedIcon fontSize="small" /></IconButton>

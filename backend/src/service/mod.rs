@@ -3,7 +3,9 @@ mod daily;
 mod notification;
 pub use daily::DailyService;
 pub use notification::{MessageSender, NotificationError};
+mod scheduled;
 mod task;
+pub use scheduled::ScheduledService;
 
 pub use category::CategoryService;
 pub use task::TaskService;

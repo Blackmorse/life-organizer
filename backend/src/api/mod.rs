@@ -2,6 +2,7 @@ mod auth;
 mod category;
 mod daily;
 mod error;
+mod scheduled;
 mod task;
 
 use axum::{Extension, Json, Router, middleware, routing::get};
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use crate::{
     auth::TelegramAuth,
     domain::User,
-    service::{CategoryService, DailyService, MessageSender, TaskService},
+    service::{CategoryService, DailyService, MessageSender, ScheduledService, TaskService},
 };
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ pub struct AppState {
 /// Services are constructed only after verification, with immutable user-scoped DAOs.
 #[derive(Clone)]
 pub(super) struct Workspace {
+    pub scheduled: ScheduledService,
     pub daily: DailyService,
     pub categories: CategoryService,
     pub tasks: TaskService,
@@ -43,6 +45,27 @@ pub fn router(state: AppState) -> Router {
                 .delete(category::delete),
         )
         .route("/tasks", get(task::list).post(task::create))
+        .route(
+            "/scheduled-tasks",
+            get(scheduled::list).post(scheduled::create),
+        )
+        .route(
+            "/scheduled-tasks/{id}",
+            axum::routing::put(scheduled::update).delete(scheduled::delete),
+        )
+        .route("/scheduled-tasks/daily", get(scheduled::daily))
+        .route(
+            "/scheduled-tasks/daily/{id}",
+            axum::routing::delete(scheduled::dismiss),
+        )
+        .route(
+            "/scheduled-tasks/daily/{id}/completion",
+            axum::routing::put(scheduled::complete),
+        )
+        .route(
+            "/scheduled-tasks/daily/{id}/subtasks",
+            axum::routing::put(scheduled::subtasks),
+        )
         .route(
             "/daily-tasks",
             get(daily::list).post(daily::select).delete(daily::remove),

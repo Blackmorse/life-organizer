@@ -8,6 +8,7 @@ import { CategoryForm } from './components/CategoryForm'
 import { CategoryTree } from './components/CategoryTree'
 import { DailyTasks } from './components/DailyTasks'
 import { DailyContext } from './components/DailyContext'
+import { ScheduledTasks } from './components/ScheduledTasks'
 import { useWorkspace } from './hooks/useWorkspace'
 import { initializeTelegram } from './telegram'
 
@@ -16,7 +17,7 @@ export default function App() {
   const workspace = useWorkspace()
   const [query, setQuery] = useState('')
   const [creatingCategory, setCreatingCategory] = useState(false)
-  const [tab, setTab] = useState<'active' | 'archive' | 'daily'>('active')
+  const [tab, setTab] = useState<'active' | 'archive' | 'daily' | 'scheduled'>('active')
   const archived = tab === 'archive'
   const visibleTasks = workspace.tasks.filter((task) => task.completed === archived)
   const disabled = workspace.loading || workspace.saving
@@ -49,20 +50,21 @@ export default function App() {
       <Divider />
       <Box component="main">
         <Stack direction="row" spacing={2} sx={{ mt: 3, mb: 1, justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h1">{tab === 'daily' ? 'Tasks of the day' : archived ? 'Archive' : 'Your workspace'}</Typography>
+          <Typography variant="h1">{tab === 'scheduled' ? 'Scheduled tasks' : tab === 'daily' ? 'Tasks of the day' : archived ? 'Archive' : 'Your workspace'}</Typography>
           {tab === 'active' && <Button variant="outlined" startIcon={<AddIcon />} disabled={disabled || creatingCategory} onClick={() => setCreatingCategory(true)}>Category</Button>}
         </Stack>
-        <Tabs aria-label="Task views" value={tab} variant="scrollable" scrollButtons="auto" onChange={(_, value: 'active' | 'archive' | 'daily') => {
+        <Tabs aria-label="Task views" value={tab} variant="scrollable" scrollButtons="auto" onChange={(_, value: 'active' | 'archive' | 'daily' | 'scheduled') => {
           setTab(value)
           setQuery('')
         }} sx={{ mb: 2 }}>
           <Tab value="active" label="Active" id="active-tab" aria-controls="active-panel" />
           <Tab value="daily" label="Tasks of the day" id="daily-tab" aria-controls="daily-panel" />
+          <Tab value="scheduled" label="Scheduled tasks" id="scheduled-tab" aria-controls="scheduled-panel" />
           <Tab value="archive" label="Archive" id="archive-tab" aria-controls="archive-panel" />
         </Tabs>
         {archived && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Completed tasks are read-only. Restore a task to edit it or move it back to your active workspace.</Typography>}
         <Typography component="div" variant="body2" color="text.secondary" role="status" aria-live="polite" sx={{ mb: 2 }}>
-          {workspace.loading ? 'Loading workspace…' : workspace.saving ? 'Saving changes…' : tab === 'daily' ? 'Today’s task and subtask picks' : `${archived ? 'Archived' : 'Active'} · ${visibleTasks.length} ${visibleTasks.length === 1 ? 'task' : 'tasks'}`}
+          {workspace.loading ? 'Loading workspace…' : workspace.saving ? 'Saving changes…' : tab === 'scheduled' ? `${workspace.scheduledTasks.length} scheduled tasks` : tab === 'daily' ? 'Today’s task and subtask picks' : `${archived ? 'Archived' : 'Active'} · ${visibleTasks.length} ${visibleTasks.length === 1 ? 'task' : 'tasks'}`}
         </Typography>
         {disabled && <LinearProgress aria-label={workspace.loading ? 'Loading workspace' : 'Saving changes'} sx={{ mb: 2 }} />}
 
@@ -91,7 +93,8 @@ export default function App() {
         </Paper>}
 
         <Box role="tabpanel" id={`${tab}-panel`} aria-labelledby={`${tab}-tab`} aria-busy={disabled}>
-          {tab === 'daily' ? <DailyTasks picks={workspace.dailyTasks} tasks={workspace.tasks} categories={workspace.categories} query={query} disabled={disabled}
+          {tab === 'scheduled' ? <ScheduledTasks tasks={workspace.scheduledTasks} query={query} disabled={disabled} onSave={workspace.saveScheduledTask} onDelete={workspace.deleteScheduledTask} /> : tab === 'daily' ? <DailyTasks picks={workspace.dailyTasks} tasks={workspace.tasks} categories={workspace.categories} query={query} disabled={disabled}
+            scheduled={workspace.scheduledDaily} onCompleteScheduled={workspace.completeScheduledDaily} onSubtasksScheduled={workspace.replaceScheduledDailySubtasks} onDismissScheduled={workspace.dismissScheduledDaily}
             onFinalize={workspace.finalizeDailyTasks} onRemove={workspace.removeDailyTask} onSetCompleted={workspace.setCompleted} onReplaceSubtasks={workspace.replaceSubtasks} /> : <>
           <CategoryTree key={tab} categories={workspace.categories} tasks={visibleTasks} query={query} disabled={disabled} archived={archived}
             onUpdateCategory={workspace.updateCategory} onDeleteCategory={workspace.deleteCategory}

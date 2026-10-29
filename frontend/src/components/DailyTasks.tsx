@@ -3,7 +3,8 @@ import { Alert, Box, Button, Checkbox, IconButton, List, ListItem, Stack, Toolti
 import TodayOutlinedIcon from '@mui/icons-material/TodayOutlined'
 import CloseIcon from '@mui/icons-material/Close'
 import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
-import type { Category, DailyTask, Subtask, Task } from '../types'
+import type { Category, DailyTask, Subtask, Task, ScheduledOccurrence } from '../types'
+import { ScheduledDaily } from './ScheduledDaily'
 
 import { DailyContext } from './DailyContext'
 
@@ -20,14 +21,20 @@ export function DailyPickButton({ taskId, step, index, label, disabled }: {
   </IconButton></span></Tooltip>
 }
 
-export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onSetCompleted, onReplaceSubtasks }: {
+export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onSetCompleted, onReplaceSubtasks, scheduled, onCompleteScheduled, onSubtasksScheduled, onDismissScheduled }: {
+  scheduled: ScheduledOccurrence[]
+  onCompleteScheduled: (id: number, completed: boolean) => Promise<boolean>
+  onSubtasksScheduled: (id: number, steps: Subtask[]) => Promise<boolean>
+  onDismissScheduled: (id: number) => Promise<boolean>
   picks: DailyTask[], tasks: Task[], categories: Category[], query: string, disabled: boolean
   onRemove: (id: number, stepId: string) => Promise<boolean>
   onSetCompleted: (id: number, completed: boolean) => Promise<boolean>
   onReplaceSubtasks: (id: number, steps: Subtask[]) => Promise<boolean>
   onFinalize: () => Promise<boolean>
 }) {
-  const [sent, setSent] = useState<{ picks: DailyTask[], tasks: Task[] } | null>(null)
+  const [sent, setSent] = useState<{ picks: DailyTask[], tasks: Task[], scheduled: ScheduledOccurrence[] } | null>(null)
+  const currentScheduled = scheduled
+  const visibleScheduled = currentScheduled.filter((item) => [item.description, ...item.subtasks.map((step) => step.description)].some((text) => text.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))
   const rows = picks.flatMap((pick) => {
     const task = tasks.find((item) => item.id === pick.task_id)
     if (!task) return []
@@ -61,14 +68,15 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
   return <Box component="section" aria-label="Daily checklist" sx={{ mt: 2 }}>
     <Typography variant="body2" color="text.secondary">Clears at 2:00 AM ({Intl.DateTimeFormat().resolvedOptions().timeZone}). Tasks and progress stay saved.</Typography>
     <Stack spacing={1} sx={{ my: 2, alignItems: 'flex-start' }}>
-      <Button variant="contained" startIcon={<SendOutlinedIcon />} disabled={disabled || rows.length === 0} onClick={async () => {
+      <Button variant="contained" startIcon={<SendOutlinedIcon />} disabled={disabled || (rows.length === 0 && currentScheduled.length === 0)} onClick={async () => {
         setSent(null)
-        if (await onFinalize()) setSent({ picks, tasks })
+        if (await onFinalize()) setSent({ picks, tasks, scheduled })
       }}>Finalize tasks</Button>
       <Typography variant="caption" color="text.secondary">Sends all current daily picks to your Telegram bot chat. Completion changes automatically send an updated list.</Typography>
     </Stack>
-    {sent?.picks === picks && sent.tasks === tasks && <Alert severity="success" role="status">Today's tasks sent to your Telegram bot chat.</Alert>}
+    {sent?.picks === picks && sent.tasks === tasks && sent.scheduled === scheduled && <Alert severity="success" role="status">Today's tasks sent to your Telegram bot chat.</Alert>}
     <List>
+      {visibleScheduled.map((item) => <ScheduledDaily key={`scheduled-${item.id}`} item={item} disabled={disabled} onComplete={onCompleteScheduled} onSubtasks={onSubtasksScheduled} onDismiss={onDismissScheduled} />)}
       {[...groups.entries()].map(([taskId, group]) => {
         const { task, category } = group[0]
         const wholeTask = group.find(({ step }) => !step)
@@ -84,6 +92,6 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
         </ListItem>
       })}
     </List>
-    {!visibleRows.length && <Typography color="text.secondary">{query ? 'No matches' : 'No tasks of the day yet. Use the calendar buttons beside tasks or subtasks to add them.'}</Typography>}
+    {!visibleRows.length && !visibleScheduled.length && <Typography color="text.secondary">{query ? 'No matches' : 'No tasks of the day yet. Use the calendar buttons beside tasks or subtasks to add them.'}</Typography>}
   </Box>
 }

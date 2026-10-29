@@ -41,6 +41,8 @@ There are three logical app components but initially only two subprojects:
 - **Completion/archive:** Completing a task moves it out of the active view into
   a read-only archive. Restore is the only allowed change to an archived task.
 - **Notifications:** Daily-list summaries and an 08:00 offer to carry unfinished picks into the new day through Yes/No bot buttons.
+- **Scheduled tasks:** Category-free recurring templates with required weekdays
+  and saved IANA timezone. Due planning days receive independent daily occurrences.
 
 ## Current repository stage
 
@@ -49,7 +51,7 @@ Category and task CRUD are available through DAO, service, and HTTP API layers.
 Users have surrogate IDs and unique Telegram IDs; each category belongs to one
 user, and tasks inherit ownership from their category. The API verifies signed
 Telegram Mini App `initData` and scopes every operation to that user.
-Each task belongs to exactly one category. Each task can contain an ordered
+Each ordinary task belongs to exactly one category. Each task can contain an ordered
 subtask list,
 with completion flags and atomic list replacement through a user-scoped API.
 Saving a nonempty fully completed subtask list automatically completes the parent.
@@ -80,6 +82,17 @@ unfinished expired picks, offers them at 08:00 in their saved device timezone,
 and polls Telegram Yes/No callbacks. PostgreSQL stores offers and polling progress;
 an advisory lock selects one worker. Subcategories and implementation
 plans are not implemented yet.
+
+Scheduled tasks live in separate user-owned `scheduled_tasks` and
+`scheduled_occurrences` tables. The Scheduled tasks tab manages description,
+optional ordered subtasks, and a required weekly schedule (one or more
+weekdays; all seven means daily). Saved device timezone determines planning days,
+which run from local 02:00 to the next local 02:00. A background sweep and lazy
+API generation create today's due occurrences idempotently, including after
+downtime, without backfilling missed days. Each occurrence starts unchecked;
+completion and removal affect today only. Schedule edits affect future snapshots;
+deleting a schedule deletes its occurrences. Current occurrences join daily-list
+Telegram summaries, but do not create morning carryover offers.
 
 ## Guidance for future changes
 

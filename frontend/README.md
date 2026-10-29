@@ -5,6 +5,25 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 ## Features
 
 - Browse an expandable category/task hierarchy, with per-category counts.
+- **Scheduled tasks** manages recurring tasks without categories. Create a
+  description, choose at least one weekday (e.g. Monday, Wednesday, Friday),
+  and save the schedule. Select all seven days for daily repetition. Device
+  timezone is prefilled; schedules keep that saved IANA timezone. Optional
+  ordered subtasks are supported; scheduled tasks have no urgency.
+  Due days automatically add a fresh unchecked occurrence to **Tasks of the day**,
+  marked **Scheduled**. Complete or skip today without stopping future repeats.
+  Open the daily occurrence to track/edit its subtasks; completing every step
+  completes today's occurrence only. Schedule edits affect future occurrences;
+  deleting a schedule removes its occurrences too. No category is needed.
+  Planning days start at **2:00 AM** in the saved timezone, so before that boundary
+  the previous weekday still applies. The backend generates due work while the app
+  is closed and catches up today's work after downtime, without adding missed days.
+  The open app reloads scheduled occurrences every 30 seconds and on focus,
+  clearing expired rows at rollover even if the network is unavailable.
+  Scheduled occurrences join finalized Telegram summaries and progress updates;
+  they do not produce morning carryover offers. Restart the backend to apply
+  migrations `0009_scheduled_tasks.sql` and `0010_scheduled_tasks_without_urgency.sql`
+  automatically. Existing scheduled details and progress are preserved.
 - Use calendar buttons beside active tasks or subtasks to add/remove daily picks.
   **Tasks of the day** shows a checklist linked to the original work. Selected
   subtasks appear indented beneath their bold parent task name, grouped
@@ -56,7 +75,7 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 - Personal workspaces using verified Telegram Mini App authorization. Each user
   sees only their own categories and tasks.
 
-Tasks have descriptions, categories, and urgency. New and existing tasks default
+Ordinary tasks have descriptions, categories, and urgency. New and existing tasks default
 to Someday; restarting the backend applies the additive urgency migration
 automatically. These are planning horizons, not enforced due dates.
 Subcategories and implementation plans are not part of the current backend contract.

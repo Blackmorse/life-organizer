@@ -20,6 +20,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Task completion/restoration is implemented. Completed tasks form a read-only
   archive; restore before editing, moving, changing subtasks, or deleting.
 - Database migrations run automatically before the server accepts requests.
+- Category-free scheduled tasks use required weekday schedules and saved IANA
+  timezones, with independently completable daily occurrences and optional subtasks.
 - Telegram Mini App authentication verifies signed `initData` on every API request.
   Users are registered automatically; category/task operations are user-scoped.
 - Daily-list finalization sends a summary to the verified user's private Telegram
@@ -39,6 +41,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/telegram/morning.rs` | Morning-offer buttons, callback polling and acknowledgements. |
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, durable callback processing, singleton worker lifecycle. |
 | `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
+| `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
 | `src/service/notification.rs` | Transport-independent message sender boundary and daily summary formatting. |
 | `src/api/auth.rs` | Authentication middleware, user registration, and per-user service wiring. |
 | `src/db.rs` | Create the PostgreSQL pool and apply migrations; reused by tests. |
@@ -81,7 +84,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   unknown or duplicate IDs are rejected. Unselected steps may omit `id`.
   Subtasks have no independent categories, urgency, archive, or nested children.
   They inherit the parent's ownership and lifecycle; deleting the task deletes steps.
-- Each task belongs to exactly one category; categories can contain many tasks.
+- Each ordinary task belongs to exactly one category; categories can contain many tasks.
 - `tasks.completed`: `BOOLEAN NOT NULL DEFAULT FALSE`, added by migration
   `0005_task_completion.sql`. Existing/new tasks start active. Completion preserves
   description, category, urgency, and subtasks; restoration only resets this flag.
@@ -118,6 +121,14 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/me` | Current user `{id, telegram_id}` (`200`). |
+| GET | `/scheduled-tasks` | List owned recurring templates (`200`). |
+| POST | `/scheduled-tasks` | Create a category-free recurring template (`201`). |
+| PUT | `/scheduled-tasks/{id}` | Replace template details/schedule (`200`). |
+| DELETE | `/scheduled-tasks/{id}` | Delete template and its occurrences (`204`). |
+| GET | `/scheduled-tasks/daily` | Generate and list today's visible, unexpired occurrences (`200`). |
+| PUT | `/scheduled-tasks/daily/{id}/completion` | Set occurrence completion; return current occurrences (`200`). |
+| PUT | `/scheduled-tasks/daily/{id}/subtasks` | Replace occurrence steps and recalculate completion; return occurrences (`200`). |
+| DELETE | `/scheduled-tasks/daily/{id}` | Skip occurrence for today only; return current occurrences (`200`). |
 | GET | `/daily-tasks` | Current user's unexpired daily picks (`200`). |
 | POST | `/daily-tasks` | Select a whole task or one subtask; return current picks (`200`). |
 | DELETE | `/daily-tasks` | Remove a pick only; return current picks (`200`). |
@@ -177,6 +188,52 @@ task progress are unchanged by finalization. The shared HTTP client has 5-second
 connect and 15-second per-request timeouts and does not follow redirects.
 Bot users must first open the private chat and press Start/send `/start`, and must
 not block the bot. No additional token or chat-ID environment variable is needed.
+
+### Scheduled tasks
+
+Migration `0009_scheduled_tasks.sql` adds directly user-owned `scheduled_tasks`
+templates and `scheduled_occurrences` snapshots, without categories or synthetic
+category records. Template POST/PUT example:
+
+```json
+{"description":"Sport exercises","weekdays":[1,3,5],"timezone":"Europe/Berlin","subtasks":[{"description":"Warm up","completed":false}]}
+```
+
+Weekdays are distinct ISO day numbers (Monday=1 through Sunday=7), with at least
+one required; all seven means every day. Timezone is required and validated
+against PostgreSQL's timezone catalog. Subtasks default to an empty list.
+Scheduled tasks have no urgency; migration `0010_scheduled_tasks_without_urgency.sql`
+removes urgency from templates and occurrences while preserving existing progress.
+Templates return the input fields plus generated `id`.
+Template step flags are normalized to false; step IDs are not accepted.
+Descriptions and step descriptions must be nonblank. Unknown fields are rejected.
+
+`generate_scheduled_occurrences(owner_id, instant)` generates only the current
+planning day, using `daily_reset_at` and local calendar dates (including DST).
+Planning days start at 02:00; before then, the previous weekday still applies.
+An occurrence snapshots description and steps, all initially unchecked.
+Uniqueness on `(scheduled_task_id, planning_date)` prevents duplicates under
+concurrent sweeps/requests. Generation runs every 30 seconds in the existing worker,
+on scheduled daily reads, and before summary resolution. Restart catches up today's
+due work only; missed days are not backfilled. New due templates appear immediately
+on the next daily read, including creation during the current planning day.
+
+Daily responses contain `{id, scheduled_task_id, description, subtasks,
+completed, expires_at}` with expiry in Unix milliseconds. Completion accepts
+`{"completed":true}`; subtask writes accept the same object list as ordinary tasks,
+but without stable IDs. A nonempty fully checked list completes only that
+occurrence. Occurrences remain editable/reopenable until expiry and never archive
+their template. Expired, hidden, missing, or inaccessible occurrences return `404`
+for progress writes. Removal sets a hidden tombstone so refresh cannot regenerate
+today's occurrence. Template edits affect future snapshots, preserving today's
+progress; template deletion cascades to all its occurrences. Occurrence snapshots
+remain stored after expiry but are excluded from all active reads and summaries.
+
+Finalization includes visible unexpired occurrences with ordinary picks in the
+same SQL snapshot. Internal negative occurrence IDs separate summary groups from
+positive ordinary task IDs; API identities remain positive and use separate routes.
+Scheduled occurrences do not enter morning carryover offers. Each scheduled day
+already creates fresh work regardless of previous completion.
 
 ### Morning carryover offers
 
