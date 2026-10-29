@@ -1,5 +1,6 @@
 mod support;
 
+use backend::domain::TaskUrgency;
 use backend::service::ServiceError;
 use support::TestDb;
 
@@ -9,7 +10,10 @@ async fn services_validate_input_without_writing_invalid_data() {
     let categories = db.category_service();
     let tasks = db.task_service();
     let category = categories.create("Work").await.unwrap();
-    let task = tasks.create(category.id, "Build backend").await.unwrap();
+    let task = tasks
+        .create(category.id, "Build backend", TaskUrgency::Soon)
+        .await
+        .unwrap();
     for description in ["", "  \n\t", "\u{2003}"] {
         assert!(matches!(
             categories.create(description).await,
@@ -20,11 +24,15 @@ async fn services_validate_input_without_writing_invalid_data() {
             Err(ServiceError::InvalidInput(_))
         ));
         assert!(matches!(
-            tasks.create(category.id, description).await,
+            tasks
+                .create(category.id, description, TaskUrgency::Someday)
+                .await,
             Err(ServiceError::InvalidInput(_))
         ));
         assert!(matches!(
-            tasks.update(task.id, category.id, description).await,
+            tasks
+                .update(task.id, category.id, description, TaskUrgency::Someday)
+                .await,
             Err(ServiceError::InvalidInput(_))
         ));
     }
@@ -46,15 +54,19 @@ async fn services_validate_input_without_writing_invalid_data() {
             Err(ServiceError::InvalidInput(_))
         ));
         assert!(matches!(
-            tasks.create(id, "Valid").await,
+            tasks.create(id, "Valid", TaskUrgency::Someday).await,
             Err(ServiceError::InvalidInput(_))
         ));
         assert!(matches!(
-            tasks.update(id, category.id, "Valid").await,
+            tasks
+                .update(id, category.id, "Valid", TaskUrgency::Someday)
+                .await,
             Err(ServiceError::InvalidInput(_))
         ));
         assert!(matches!(
-            tasks.update(task.id, id, "Valid").await,
+            tasks
+                .update(task.id, id, "Valid", TaskUrgency::Someday)
+                .await,
             Err(ServiceError::InvalidInput(_))
         ));
         assert!(matches!(
@@ -86,28 +98,34 @@ async fn services_expose_crud_and_translate_missing_rows_and_conflicts() {
         Err(ServiceError::NotFound("category"))
     ));
     assert!(matches!(
-        tasks.create(999, "Orphan").await,
+        tasks.create(999, "Orphan", TaskUrgency::Someday).await,
         Err(ServiceError::NotFound("category"))
     ));
     let category = categories.create("Work").await.unwrap();
     assert_eq!(categories.get(category.id).await.unwrap(), category);
     let updated = categories.update(category.id, "Home").await.unwrap();
     assert_eq!(updated.description, "Home");
-    let task = tasks.create(category.id, "Build backend").await.unwrap();
+    let task = tasks
+        .create(category.id, "Build backend", TaskUrgency::Upcoming)
+        .await
+        .unwrap();
     assert_eq!(tasks.get(task.id).await.unwrap(), task);
     assert!(matches!(
         categories.delete(category.id).await,
         Err(ServiceError::Conflict)
     ));
     assert!(matches!(
-        tasks.update(task.id, 999, "Orphan").await,
+        tasks
+            .update(task.id, 999, "Orphan", TaskUrgency::Someday)
+            .await,
         Err(ServiceError::NotFound("category"))
     ));
     let updated = tasks
-        .update(task.id, category.id, "Write docs")
+        .update(task.id, category.id, "Write docs", TaskUrgency::Soon)
         .await
         .unwrap();
     assert_eq!(updated.description, "Write docs");
+    assert_eq!(updated.urgency, TaskUrgency::Soon);
     assert_eq!(tasks.list(Some(category.id)).await.unwrap(), vec![updated]);
     tasks.delete(task.id).await.unwrap();
     assert!(matches!(
@@ -115,7 +133,9 @@ async fn services_expose_crud_and_translate_missing_rows_and_conflicts() {
         Err(ServiceError::NotFound("task"))
     ));
     assert!(matches!(
-        tasks.update(task.id, category.id, "Missing").await,
+        tasks
+            .update(task.id, category.id, "Missing", TaskUrgency::Someday)
+            .await,
         Err(ServiceError::NotFound("task"))
     ));
     assert!(matches!(

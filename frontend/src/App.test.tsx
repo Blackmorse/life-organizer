@@ -73,12 +73,13 @@ describe('workspace', () => {
 
   it('starts with a category/task hierarchy and opens task details without showing creation forms', async () => {
     mockApi([{ id: 1, user_id: 1, description: 'Work' }, { id: 2, user_id: 1, description: 'Home' }], [
-      { id: 1, category_id: 1, description: 'Build mini app' },
-      { id: 2, category_id: 2, description: 'Clean desk' },
+      { id: 1, category_id: 1, description: 'Build mini app', urgency: 'upcoming' },
+      { id: 2, category_id: 2, description: 'Clean desk', urgency: 'someday' },
     ])
     const user = userEvent.setup()
     renderWorkspace()
     const task = await screen.findByRole('button', { name: 'View task Build mini app' })
+    expect(within(task).getByText('Upcoming')).toBeInTheDocument()
     expect(within(screen.getByRole('list', { name: 'Tasks in Work' })).getByRole('button', { name: 'View task Build mini app' })).toBe(task)
     expect(within(screen.getByRole('list', { name: 'Tasks in Home' })).queryByRole('button', { name: 'View task Build mini app' })).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
@@ -92,8 +93,8 @@ describe('workspace', () => {
 
   it('collapses categories and searches across tasks, revealing matching branches', async () => {
     mockApi([{ id: 1, user_id: 1, description: 'Work' }, { id: 2, user_id: 1, description: 'Home' }], [
-      { id: 1, category_id: 1, description: 'Build mini app' },
-      { id: 2, category_id: 2, description: 'Clean desk' },
+      { id: 1, category_id: 1, description: 'Build mini app', urgency: 'soon' },
+      { id: 2, category_id: 2, description: 'Clean desk', urgency: 'someday' },
     ])
     const user = userEvent.setup()
     renderWorkspace()
@@ -131,16 +132,19 @@ describe('workspace', () => {
     await screen.findByRole('button', { name: 'Projects, 0 tasks' })
     await user.click(screen.getByRole('button', { name: 'Add task to Projects' }))
     await user.type(screen.getByRole('textbox', { name: /Task description/ }), 'Build mini app')
+    expect(screen.getByRole('combobox', { name: /Urgency/ })).toHaveValue('someday')
+    await user.selectOptions(screen.getByRole('combobox', { name: /Urgency/ }), 'upcoming')
     await user.click(screen.getByRole('button', { name: 'Create task' }))
     await screen.findByRole('button', { name: 'View task Build mini app' })
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
     expect(screen.getByRole('button', { name: 'View task Build mini app' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Projects, 1 task' })).toBeInTheDocument()
+    expect(within(screen.getByRole('button', { name: 'View task Build mini app' })).getByText('Upcoming')).toBeInTheDocument()
   })
 
   it('reports category conflicts, moves tasks between branches, and deletes entities', async () => {
-    mockApi([{ id: 1, user_id: 1, description: 'Work' }, { id: 2, user_id: 1, description: 'Home' }], [{ id: 1, category_id: 1, description: 'First task' }])
+    mockApi([{ id: 1, user_id: 1, description: 'Work' }, { id: 2, user_id: 1, description: 'Home' }], [{ id: 1, category_id: 1, description: 'First task', urgency: 'upcoming' }])
     const user = userEvent.setup()
     renderWorkspace()
     await screen.findByRole('button', { name: 'View task First task' })
@@ -149,11 +153,14 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: 'View task First task' }))
     await user.click(screen.getByRole('button', { name: 'Edit task First task' }))
     const editor = screen.getByRole('button', { name: 'Save changes' }).closest('form')!
+    expect(within(editor).getByRole('combobox', { name: /Urgency/ })).toHaveValue('upcoming')
+    await user.selectOptions(within(editor).getByRole('combobox', { name: /Urgency/ }), 'soon')
     await user.selectOptions(within(editor).getByRole('combobox', { name: /Category/ }), '2')
     await user.clear(within(editor).getByRole('textbox', { name: /Task description/ }))
     await user.type(within(editor).getByRole('textbox', { name: /Task description/ }), 'Moved task')
     await user.click(within(editor).getByRole('button', { name: 'Save changes' }))
     await screen.findByRole('button', { name: 'View task Moved task' })
+    expect(within(screen.getByRole('button', { name: 'View task Moved task' })).getByText('Soon')).toBeInTheDocument()
     expect(within(screen.getByRole('list', { name: 'Tasks in Work' })).queryByRole('button', { name: 'View task Moved task' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('list', { name: 'Tasks in Home' })).getByRole('button', { name: 'View task Moved task' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'View task Moved task' }))
@@ -180,10 +187,12 @@ describe('workspace', () => {
     renderWorkspace()
     await user.click(await screen.findByRole('button', { name: 'Add task to Work' }))
     await user.type(screen.getByRole('textbox', { name: /Task description/ }), 'Keep my draft')
+    await user.selectOptions(screen.getByRole('combobox', { name: /Urgency/ }), 'soon')
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
     await user.click(screen.getByRole('button', { name: 'Create task' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Check the Rust server and database')
     expect(screen.getByRole('textbox', { name: /Task description/ })).toHaveValue('Keep my draft')
+    expect(screen.getByRole('combobox', { name: /Urgency/ })).toHaveValue('soon')
     await user.click(screen.getByRole('button', { name: 'Create task' }))
     await screen.findByRole('button', { name: 'View task Keep my draft' })
     expect(screen.queryByRole('textbox', { name: /Task description/ })).not.toBeInTheDocument()

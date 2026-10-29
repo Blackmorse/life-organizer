@@ -5,6 +5,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use backend::domain::TaskUrgency;
 use serde_json::{Value, json};
 use support::TestDb;
 use tower::ServiceExt;
@@ -115,6 +116,7 @@ async fn task_routes_support_crud_filtering_and_reassignment() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(task["category_id"], category.id);
+    assert_eq!(task["urgency"], "someday");
     assert!(task["id"].as_i64().unwrap() > 0);
     let path = format!("/tasks/{}", task["id"]);
     assert_eq!(
@@ -134,12 +136,13 @@ async fn task_routes_support_crud_filtering_and_reassignment() {
         &app,
         "PUT",
         &path,
-        Some(json!({"category_id": other_category.id, "description": "Clean desk"})),
+        Some(json!({"category_id": other_category.id, "description": "Clean desk", "urgency": "soon"})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["category_id"], other_category.id);
     assert_eq!(updated["description"], "Clean desk");
+    assert_eq!(updated["urgency"], "soon");
     assert_eq!(
         request(&app, "GET", &path, None).await,
         (StatusCode::OK, updated.clone())
@@ -163,12 +166,55 @@ async fn task_routes_support_crud_filtering_and_reassignment() {
 }
 
 #[tokio::test]
+async fn task_urgency_round_trips_and_rejects_invalid_updates() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let app = db.app();
+    for urgency in ["someday", "upcoming", "soon"] {
+        let (status, task) = request(
+            &app,
+            "POST",
+            "/tasks",
+            Some(json!({"category_id":category.id,"description":"Plan work","urgency":urgency})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(task["urgency"], urgency);
+        let path = format!("/tasks/{}", task["id"]);
+        assert_eq!(request(&app, "GET", &path, None).await.1, task);
+        for invalid in [json!("critical"), json!(""), Value::Null, json!(1)] {
+            let response = app.clone().oneshot(
+                Request::builder().method("PUT").uri(&path)
+                    .header("authorization", support::authorization_for(support::TELEGRAM_ID))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"category_id":category.id,"description":"Changed","urgency":invalid}).to_string()))
+                    .unwrap()
+            ).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let expected = if invalid.is_string() {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            assert_eq!(
+                status,
+                expected,
+                "{invalid}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        assert_eq!(request(&app, "GET", &path, None).await.1, task);
+    }
+}
+
+#[tokio::test]
 async fn api_reports_validation_missing_categories_and_delete_conflicts() {
     let db = TestDb::new().await;
     let category = db.category_service().create("Work").await.unwrap();
     let task = db
         .task_service()
-        .create(category.id, "Build backend")
+        .create(category.id, "Build backend", TaskUrgency::Someday)
         .await
         .unwrap();
     let app = db.app();
@@ -247,6 +293,16 @@ async fn api_rejects_malformed_payloads_and_hides_database_errors() {
             r#"{"description":"Missing category"}"#,
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
+        (
+            "/tasks",
+            r#"{"category_id":1,"description":"Invalid urgency","urgency":"critical"}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "/tasks",
+            r#"{"category_id":1,"description":"Null urgency","urgency":null}"#,
+            StatusCode::BAD_REQUEST,
+        ),
     ] {
         let response = app
             .clone()
@@ -264,7 +320,14 @@ async fn api_rejects_malformed_payloads_and_hides_database_errors() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), expected);
+        let status = response.status();
+        let response_body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(
+            status,
+            expected,
+            "{body}: {}",
+            String::from_utf8_lossy(&response_body)
+        );
     }
     db.pool.close().await;
     assert_eq!(

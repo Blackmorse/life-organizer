@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::{dao::TaskDao, domain::Task};
+use crate::{
+    dao::TaskDao,
+    domain::{Task, TaskUrgency},
+};
 
 use super::{ServiceError, validate_description, validate_id};
 
@@ -14,10 +17,15 @@ impl TaskService {
         Self { dao }
     }
 
-    pub async fn create(&self, category_id: i64, description: &str) -> Result<Task, ServiceError> {
+    pub async fn create(
+        &self,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+    ) -> Result<Task, ServiceError> {
         validate_id(category_id)?;
         validate_description(description)?;
-        Ok(self.dao.create(category_id, description).await?)
+        Ok(self.dao.create(category_id, description, urgency).await?)
     }
 
     pub async fn get(&self, id: i64) -> Result<Task, ServiceError> {
@@ -40,12 +48,13 @@ impl TaskService {
         id: i64,
         category_id: i64,
         description: &str,
+        urgency: TaskUrgency,
     ) -> Result<Task, ServiceError> {
         validate_id(id)?;
         validate_id(category_id)?;
         validate_description(description)?;
         self.dao
-            .update(id, category_id, description)
+            .update(id, category_id, description, urgency)
             .await?
             .ok_or(ServiceError::NotFound("task"))
     }

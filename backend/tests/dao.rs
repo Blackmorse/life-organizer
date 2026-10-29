@@ -3,6 +3,7 @@ mod support;
 use backend::{
     dao::{CategoryDao, DaoError, TaskDao},
     db::MIGRATOR,
+    domain::TaskUrgency,
 };
 use support::TestDb;
 
@@ -39,30 +40,38 @@ async fn task_crud_filtering_and_reassignment() {
     let first = categories.create("Work").await.unwrap();
     let second = categories.create("Home").await.unwrap();
     assert!(dao.list(None).await.unwrap().is_empty());
-    let task = dao.create(first.id, "Build backend").await.unwrap();
-    let other = dao.create(first.id, "Write docs").await.unwrap();
+    let task = dao
+        .create(first.id, "Build backend", TaskUrgency::Upcoming)
+        .await
+        .unwrap();
+    let other = dao
+        .create(first.id, "Write docs", TaskUrgency::Someday)
+        .await
+        .unwrap();
     assert!(task.id > 0);
     assert_ne!(task.id, other.id);
+    assert_eq!(task.urgency, TaskUrgency::Upcoming);
     assert_eq!(dao.get(task.id).await.unwrap(), Some(task.clone()));
     assert_eq!(
         dao.list(None).await.unwrap(),
         vec![task.clone(), other.clone()]
     );
     let updated = dao
-        .update(task.id, second.id, "Clean desk")
+        .update(task.id, second.id, "Clean desk", TaskUrgency::Soon)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(updated.id, task.id);
     assert_eq!(updated.category_id, second.id);
     assert_eq!(updated.description, "Clean desk");
+    assert_eq!(updated.urgency, TaskUrgency::Soon);
     assert_eq!(dao.get(task.id).await.unwrap(), Some(updated.clone()));
     assert_eq!(dao.list(Some(first.id)).await.unwrap(), vec![other]);
     assert_eq!(dao.list(Some(second.id)).await.unwrap(), vec![updated]);
     assert!(dao.delete(task.id).await.unwrap());
     assert!(dao.get(task.id).await.unwrap().is_none());
     assert!(
-        dao.update(task.id, first.id, "Missing")
+        dao.update(task.id, first.id, "Missing", TaskUrgency::Someday)
             .await
             .unwrap()
             .is_none()
@@ -76,13 +85,18 @@ async fn foreign_keys_prevent_orphans_and_accidental_cascade_deletion() {
     let categories = db.categories();
     let tasks = db.tasks();
     assert!(matches!(
-        tasks.create(999, "Orphan").await,
+        tasks.create(999, "Orphan", TaskUrgency::Someday).await,
         Err(DaoError::CategoryMissing)
     ));
     let category = categories.create("Work").await.unwrap();
-    let task = tasks.create(category.id, "Build backend").await.unwrap();
+    let task = tasks
+        .create(category.id, "Build backend", TaskUrgency::Soon)
+        .await
+        .unwrap();
     assert!(matches!(
-        tasks.update(task.id, 999, "Orphan").await,
+        tasks
+            .update(task.id, 999, "Orphan", TaskUrgency::Upcoming)
+            .await,
         Err(DaoError::CategoryMissing)
     ));
     assert_eq!(tasks.get(task.id).await.unwrap(), Some(task.clone()));
@@ -142,7 +156,40 @@ async fn schema_enforces_required_fields_and_migrations_are_repeatable() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(applied, 2);
+    assert_eq!(applied, 3);
+}
+
+#[tokio::test]
+async fn task_urgency_defaults_and_database_constraints() {
+    let db = TestDb::new().await;
+    let category = db.categories().create("Work").await.unwrap();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (category_id, description) VALUES ($1, 'Existing client') RETURNING id",
+    )
+    .bind(category.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        db.tasks().get(id).await.unwrap().unwrap().urgency,
+        TaskUrgency::Someday
+    );
+    for (urgency, code) in [
+        (Some("invalid"), "23514"),
+        (Some(""), "23514"),
+        (None, "23502"),
+    ] {
+        let error = sqlx::query("UPDATE tasks SET urgency = $1 WHERE id = $2")
+            .bind(urgency)
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some(code)
+        );
+    }
 }
 
 #[tokio::test]

@@ -31,7 +31,8 @@ There are three logical app components but initially only two subprojects:
 
 ## Core concepts
 
-- **Tasks:** Personal work items to track and manage.
+- **Tasks:** Personal work items to track and manage, with urgency indicating
+  their planning horizon: Someday, Upcoming (weeks), or Soon (days).
 - **Categories and subcategories:** Hierarchical organization of tasks.
 - **Implementation plans:** Plans describing how to carry out a task.
 - **Notifications:** Telegram messages about relevant tasks or events; detailed notification behavior is not yet defined.

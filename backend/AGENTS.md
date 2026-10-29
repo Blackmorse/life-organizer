@@ -46,7 +46,15 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   `description TEXT NOT NULL`. `(user_id, id)` is indexed.
 - `tasks`: `id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`,
   `category_id BIGINT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT`,
-  `description TEXT NOT NULL`.
+  `description TEXT NOT NULL`, `urgency TEXT NOT NULL DEFAULT 'someday'` with a
+  check constraint allowing `someday`, `upcoming`, and `soon`.
+- Task urgency describes a planning horizon, not a deadline or completion state:
+  Someday = at some point in the future; Upcoming = within the next few weeks;
+  Soon = within the next few days. Migration `0003_task_urgency.sql` assigns
+  Someday to existing tasks without deleting data.
+- Urgency is a transport-independent `TaskUrgency` enum persisted as text.
+  Extend levels by adding a new migration for the check constraint, updating
+  the domain enum/string conversion, and updating the frontend urgency catalog.
 - Descriptions must not be blank; they are not unique keys.
 - Each task belongs to exactly one category; categories can contain many tasks.
 - Category owners use internal user IDs, not Telegram IDs. Tasks inherit their
@@ -92,7 +100,10 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | DELETE | `/tasks/{id}` | Delete task (`204`). |
 
 Category POST/PUT JSON: `{"description":"Work"}`.
-Task POST/PUT JSON: `{"category_id":1,"description":"Build backend"}`.
+Task POST/PUT JSON: `{"category_id":1,"description":"Build backend","urgency":"upcoming"}`.
+Task responses always include `urgency`. Omitted urgency defaults to `someday`
+on both POST and PUT (PUT replaces the task); null and unknown values are rejected
+by the JSON extractor. Clients should send the selected urgency on every write.
 Responses include generated `id` fields. IDs must be positive. A nonexistent
 category filter returns an empty list. Category responses also include `user_id`.
 

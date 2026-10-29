@@ -9,6 +9,9 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 - Search category names and task descriptions; matching branches expand automatically.
 - Create, rename, and delete categories through on-demand forms and action menus.
 - Create, edit, move, and delete tasks without keeping creation forms on screen.
+- Choose task urgency: **Someday** (at some point in the future), **Upcoming**
+  (next few weeks), or **Soon** (next few days). Labels appear on task rows;
+  create/edit forms let you change them.
 - Loading/saving indicators, refresh, empty states, and API errors.
 - Failed writes preserve form contents for retry.
 - Material UI components, responsive layout, light/dark themes, and an optional
@@ -16,7 +19,10 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 - Personal workspaces using verified Telegram Mini App authorization. Each user
   sees only their own categories and tasks.
 
-Tasks have descriptions and categories. Completion status, subcategories, and
+Tasks have descriptions, categories, and urgency. New and existing tasks default
+to Someday; restarting the backend applies the additive urgency migration
+automatically. These are planning horizons, not enforced due dates.
+Completion status, subcategories, and
 implementation plans are not part of the current backend contract.
 
 ## Local development

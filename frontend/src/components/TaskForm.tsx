@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { Box, Button, Stack, TextField } from '@mui/material'
 import type { Category, TaskInput } from '../types'
+import { TASK_URGENCIES, type TaskUrgency } from '../urgency'
 
 interface Props {
   categories: Category[]
@@ -15,13 +16,17 @@ interface Props {
 export function TaskForm({ categories, initial, preferredCategoryId, disabled, submitLabel, onSave, onCancel }: Props) {
   const id = useId()
   const [description, setDescription] = useState(initial?.description ?? '')
+  const [urgency, setUrgency] = useState<TaskUrgency>(initial?.urgency ?? 'someday')
   const [categoryId, setCategoryId] = useState(initial?.category_id ?? preferredCategoryId ?? categories[0]?.id ?? 0)
   const resolvedCategoryId = categories.some((category) => category.id === categoryId) ? categoryId : categories[0]?.id ?? 0
   return (
     <Box component="form" onSubmit={async (event) => {
       event.preventDefault()
       if (!description.trim() || !resolvedCategoryId) return
-      if (await onSave({ description: description.trim(), category_id: resolvedCategoryId }) && !initial) setDescription('')
+      if (await onSave({ description: description.trim(), category_id: resolvedCategoryId, urgency }) && !initial) {
+        setDescription('')
+        setUrgency('someday')
+      }
     }}>
       <Stack spacing={2}>
         <TextField id={`${id}-description`} label="Task description" multiline minRows={3} autoFocus
@@ -33,6 +38,12 @@ export function TaskForm({ categories, initial, preferredCategoryId, disabled, s
             onChange={(event) => setCategoryId(Number(event.target.value))} required disabled={disabled || categories.length === 0}>
             {categories.length === 0 && <option value={0}>Create a category first</option>}
             {categories.map((category) => <option key={category.id} value={category.id}>{category.description}</option>)}
+          </TextField>
+          <TextField id={`${id}-urgency`} label="Urgency" select value={urgency}
+            slotProps={{ select: { native: true } }} sx={{ flex: 1 }}
+            helperText={TASK_URGENCIES[urgency].description}
+            onChange={(event) => setUrgency(event.target.value as TaskUrgency)} required disabled={disabled}>
+            {Object.entries(TASK_URGENCIES).map(([value, option]) => <option key={value} value={value}>{option.label}</option>)}
           </TextField>
           <Stack direction="row" spacing={1} sx={{ flexShrink: 0, justifyContent: 'flex-end' }}>
             {onCancel && <Button onClick={onCancel} disabled={disabled}>Cancel</Button>}

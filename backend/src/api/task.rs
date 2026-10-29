@@ -5,7 +5,10 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::{domain::Task, service::ServiceError};
+use crate::{
+    domain::{Task, TaskUrgency},
+    service::ServiceError,
+};
 
 use super::Workspace;
 
@@ -13,6 +16,8 @@ use super::Workspace;
 pub struct TaskInput {
     category_id: i64,
     description: String,
+    #[serde(default)]
+    urgency: TaskUrgency,
 }
 
 #[derive(Deserialize)]
@@ -26,7 +31,7 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Task>), ServiceError> {
     let task = state
         .tasks
-        .create(input.category_id, &input.description)
+        .create(input.category_id, &input.description, input.urgency)
         .await?;
     Ok((StatusCode::CREATED, Json(task)))
 }
@@ -53,7 +58,7 @@ pub async fn update(
     Ok(Json(
         state
             .tasks
-            .update(id, input.category_id, &input.description)
+            .update(id, input.category_id, &input.description, input.urgency)
             .await?,
     ))
 }
