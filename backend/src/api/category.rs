@@ -1,13 +1,9 @@
-use axum::{
-    Json,
-    extract::{Path, State},
-    http::StatusCode,
-};
+use axum::{Extension, Json, extract::Path, http::StatusCode};
 use serde::Deserialize;
 
 use crate::{domain::Category, service::ServiceError};
 
-use super::AppState;
+use super::Workspace;
 
 #[derive(Deserialize)]
 pub struct CategoryInput {
@@ -15,7 +11,7 @@ pub struct CategoryInput {
 }
 
 pub async fn create(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Json(input): Json<CategoryInput>,
 ) -> Result<(StatusCode, Json<Category>), ServiceError> {
     let category = state.categories.create(&input.description).await?;
@@ -23,18 +19,20 @@ pub async fn create(
 }
 
 pub async fn get(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Path(id): Path<i64>,
 ) -> Result<Json<Category>, ServiceError> {
     Ok(Json(state.categories.get(id).await?))
 }
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<Category>>, ServiceError> {
+pub async fn list(
+    Extension(state): Extension<Workspace>,
+) -> Result<Json<Vec<Category>>, ServiceError> {
     Ok(Json(state.categories.list().await?))
 }
 
 pub async fn update(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Path(id): Path<i64>,
     Json(input): Json<CategoryInput>,
 ) -> Result<Json<Category>, ServiceError> {
@@ -42,7 +40,7 @@ pub async fn update(
 }
 
 pub async fn delete(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ServiceError> {
     state.categories.delete(id).await?;

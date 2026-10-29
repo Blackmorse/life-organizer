@@ -1,13 +1,13 @@
 use axum::{
-    Json,
-    extract::{Path, Query, State},
+    Extension, Json,
+    extract::{Path, Query},
     http::StatusCode,
 };
 use serde::Deserialize;
 
 use crate::{domain::Task, service::ServiceError};
 
-use super::AppState;
+use super::Workspace;
 
 #[derive(Deserialize)]
 pub struct TaskInput {
@@ -21,7 +21,7 @@ pub struct TaskFilter {
 }
 
 pub async fn create(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Json(input): Json<TaskInput>,
 ) -> Result<(StatusCode, Json<Task>), ServiceError> {
     let task = state
@@ -32,21 +32,21 @@ pub async fn create(
 }
 
 pub async fn get(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Path(id): Path<i64>,
 ) -> Result<Json<Task>, ServiceError> {
     Ok(Json(state.tasks.get(id).await?))
 }
 
 pub async fn list(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Query(filter): Query<TaskFilter>,
 ) -> Result<Json<Vec<Task>>, ServiceError> {
     Ok(Json(state.tasks.list(filter.category_id).await?))
 }
 
 pub async fn update(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Path(id): Path<i64>,
     Json(input): Json<TaskInput>,
 ) -> Result<Json<Task>, ServiceError> {
@@ -59,7 +59,7 @@ pub async fn update(
 }
 
 pub async fn delete(
-    State(state): State<AppState>,
+    Extension(state): Extension<Workspace>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ServiceError> {
     state.tasks.delete(id).await?;

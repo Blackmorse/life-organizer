@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
 use backend::{
     api::{AppState, router},
+    auth::TelegramAuth,
     config::Config,
-    dao::{PgCategoryDao, PgTaskDao},
     db::connect_and_migrate,
-    service::{CategoryService, TaskService},
 };
 
 #[tokio::main]
@@ -13,8 +10,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     let pool = connect_and_migrate(&config.database_url).await?;
     let state = AppState {
-        categories: CategoryService::new(Arc::new(PgCategoryDao::new(pool.clone()))),
-        tasks: TaskService::new(Arc::new(PgTaskDao::new(pool.clone()))),
+        pool: pool.clone(),
+        auth: TelegramAuth::new(&config.telegram_bot_token),
     };
     let listener = tokio::net::TcpListener::bind(config.bind_address).await?;
     println!("Listening on {}", listener.local_addr()?);

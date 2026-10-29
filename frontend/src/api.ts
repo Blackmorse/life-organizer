@@ -1,0 +1,53 @@
+import type { Category, Task, TaskInput } from './types'
+import { getTelegramInitData } from './telegram'
+
+export class AuthorizationError extends Error {}
+
+async function request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  const initData = getTelegramInitData()
+  if (!initData) throw new AuthorizationError('Open Scheduler from your bot’s menu button inside Telegram to access your personal workspace.')
+  const headers: Record<string, string> = { Authorization: `tma ${initData}` }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  let response: Response
+  try {
+    response = await fetch(`/api${path}`, {
+      method,
+      signal,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    throw new Error('Cannot reach the API. Check that the frontend and Rust backend are running.')
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) throw new AuthorizationError('Telegram authorization expired or was rejected. Close and reopen the Mini App from your bot’s menu button.')
+    const text = await response.text()
+    let message = text || `API request failed (${response.status}).`
+    try {
+      const payload: unknown = JSON.parse(text)
+      if (typeof payload === 'object' && payload !== null && 'error' in payload && typeof payload.error === 'string') {
+        message = payload.error
+      }
+    } catch {
+      // Axum extractor errors and development proxy failures can be plain text.
+    }
+    if (response.status === 409) message += '. Move or delete its tasks first.'
+    if (response.status >= 500) message = 'The API is unavailable. Check the Rust server and database, then retry.'
+    throw new Error(message)
+  }
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+export const api = {
+  listCategories: (signal?: AbortSignal) => request<Category[]>('/categories', 'GET', undefined, signal),
+  createCategory: (description: string) => request<Category>('/categories', 'POST', { description }),
+  updateCategory: (id: number, description: string) => request<Category>(`/categories/${id}`, 'PUT', { description }),
+  deleteCategory: (id: number) => request<void>(`/categories/${id}`, 'DELETE'),
+  listTasks: (signal?: AbortSignal) => request<Task[]>('/tasks', 'GET', undefined, signal),
+  createTask: (input: TaskInput) => request<Task>('/tasks', 'POST', input),
+  updateTask: (id: number, input: TaskInput) => request<Task>(`/tasks/${id}`, 'PUT', input),
+  deleteTask: (id: number) => request<void>(`/tasks/${id}`, 'DELETE'),
+}

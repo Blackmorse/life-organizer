@@ -101,8 +101,9 @@ async fn schema_enforces_required_fields_and_migrations_are_repeatable() {
     let db = TestDb::new().await;
     let category = db.categories().create("Work").await.unwrap();
     for description in ["", "  \n\t"] {
-        let error = sqlx::query("INSERT INTO categories (description) VALUES ($1)")
+        let error = sqlx::query("INSERT INTO categories (description, user_id) VALUES ($1, $2)")
             .bind(description)
+            .bind(db.user.id)
             .execute(&db.pool)
             .await
             .unwrap_err();
@@ -141,5 +142,55 @@ async fn schema_enforces_required_fields_and_migrations_are_repeatable() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(applied, 1);
+    assert_eq!(applied, 2);
+}
+
+#[tokio::test]
+async fn users_have_unique_telegram_ids_and_categories_require_a_valid_owner() {
+    use backend::dao::PgUserDao;
+    let db = TestDb::new().await;
+    let users = PgUserDao::new(db.pool.clone());
+    let telegram_id = support::TELEGRAM_ID + 1;
+    let (first, concurrent) = tokio::join!(
+        users.get_or_create(telegram_id),
+        users.get_or_create(telegram_id)
+    );
+    let first = first.unwrap();
+    assert_eq!(first, concurrent.unwrap());
+    assert_eq!(first.telegram_id, telegram_id);
+    assert_ne!(first.id, telegram_id, "database IDs are surrogate keys");
+    assert_ne!(first.id, db.user.id);
+    for (query, code) in [
+        (
+            "INSERT INTO users (telegram_id) SELECT telegram_id FROM users LIMIT 1",
+            "23505",
+        ),
+        ("INSERT INTO users (telegram_id) VALUES (NULL)", "23502"),
+        ("INSERT INTO users (telegram_id) VALUES (0)", "23514"),
+        (
+            "INSERT INTO categories (description) VALUES ('Missing owner')",
+            "23502",
+        ),
+        (
+            "INSERT INTO categories (description, user_id) VALUES ('Unknown owner', 999999)",
+            "23503",
+        ),
+    ] {
+        let error = sqlx::query(query).execute(&db.pool).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some(code)
+        );
+    }
+    let category = db.categories().create("Owned category").await.unwrap();
+    assert_eq!(category.user_id, db.user.id);
+    let error = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(db.user.id)
+        .execute(&db.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23503")
+    );
 }

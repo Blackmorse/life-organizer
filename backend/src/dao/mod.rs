@@ -1,8 +1,10 @@
 mod category;
 mod task;
+mod user;
 
 pub use category::{CategoryDao, PgCategoryDao};
 pub use task::{PgTaskDao, TaskDao};
+pub use user::PgUserDao;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaoError {

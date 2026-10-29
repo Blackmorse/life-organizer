@@ -160,8 +160,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "form_urlencoded",
+ "hex",
+ "hmac",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "testcontainers",
  "thiserror",

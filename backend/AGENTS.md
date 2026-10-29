@@ -16,8 +16,10 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - SQLx 0.8 provides PostgreSQL pooling, queries, and embedded versioned migrations.
 - Category and task CRUD are implemented through DAO, service, and API layers.
 - Database migrations run automatically before the server accepts requests.
-- Telegram integration, authentication, subcategories, and implementation plans
-  are not implemented yet. The Telegram library remains undecided.
+- Telegram Mini App authentication verifies signed `initData` on every API request.
+  Users are registered automatically; category/task operations are user-scoped.
+- Telegram bot messaging, subcategories, and implementation plans are not
+  implemented yet. The bot messaging library remains undecided.
 
 ### Module layout
 
@@ -25,6 +27,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | --- | --- |
 | `src/main.rs` | Bootstrap configuration, shared connection pool, services, listener, and shutdown. |
 | `src/config.rs` | Read environment-based server configuration. |
+| `src/auth.rs` | Telegram initData HMAC verification, freshness checks, and signed identity extraction. |
+| `src/api/auth.rs` | Authentication middleware, user registration, and per-user service wiring. |
 | `src/db.rs` | Create the PostgreSQL pool and apply migrations; reused by tests. |
 | `src/domain.rs` | Category and task data types, independent of SQLx and Axum. |
 | `src/dao/` | DAO traits and PostgreSQL implementations, one entity per module. |
@@ -36,13 +40,20 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 
 ### Database schema
 
+- `users`: generated `id BIGINT` primary key, positive `telegram_id BIGINT NOT NULL UNIQUE`.
 - `categories`: `id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`,
-  `description TEXT NOT NULL`.
+  `user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT`,
+  `description TEXT NOT NULL`. `(user_id, id)` is indexed.
 - `tasks`: `id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`,
   `category_id BIGINT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT`,
   `description TEXT NOT NULL`.
 - Descriptions must not be blank; they are not unique keys.
 - Each task belongs to exactly one category; categories can contain many tasks.
+- Category owners use internal user IDs, not Telegram IDs. Tasks inherit their
+  owner through their category; there is no duplicate task ownership column.
+- Migration `0002_user_ownership.sql` assumes categories are empty. Clear old
+  shared tasks/categories before upgrading; no legacy owner is guessed and no
+  data is deleted by the migration.
 - `tasks.category_id` is indexed. Tasks can be moved by updating `category_id`.
 - A category containing tasks cannot be deleted. Delete or move its tasks first.
 - Add new numbered SQL files for schema changes; do not edit migrations already
@@ -51,8 +62,24 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 
 ### HTTP API
 
+All routes require `Authorization: tma <raw Telegram.WebApp.initData>`. The
+backend validates Telegram's two-stage HMAC-SHA-256 using `TELEGRAM_BOT_TOKEN`,
+compares the hash in constant time, rejects duplicate fields, and requires a
+positive signed user ID and `auth_date` no older than 3600 seconds (at most 30
+seconds ahead of server time). Missing/invalid/expired auth returns `401` JSON.
+Close and reopen the Mini App to obtain fresh initData; there is no separate
+session token or development bypass. Do not log authorization headers or initData.
+
+Verified Telegram IDs are atomically upserted into `users`. Middleware builds
+services with immutable user-scoped DAOs for each request. All reads and writes
+filter by that owner; inaccessible records return `404`, and category filters
+for another user's category return an empty list. Both source and destination
+ownership are checked in the SQL for task moves. Request bodies cannot select
+an owner. Authenticated responses use `Cache-Control: no-store`.
+
 | Method | Path | Result |
 | --- | --- | --- |
+| GET | `/me` | Current user `{id, telegram_id}` (`200`). |
 | POST | `/categories` | Create category (`201`). |
 | GET | `/categories` | List categories ordered by ID (`200`). |
 | GET | `/categories/{id}` | Read category (`200`). |
@@ -67,7 +94,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 Category POST/PUT JSON: `{"description":"Work"}`.
 Task POST/PUT JSON: `{"category_id":1,"description":"Build backend"}`.
 Responses include generated `id` fields. IDs must be positive. A nonexistent
-category filter returns an empty list.
+category filter returns an empty list. Category responses also include `user_id`.
 
 Service errors use `{"error":"message"}`: invalid input `400`, missing entity or
 referenced category `404`, nonempty category deletion `409`, storage failure
@@ -109,7 +136,7 @@ Axum's extractor rejection responses (including `400`, `415`, and `422`).
 Run from `backend/`:
 
 ```sh
-DATABASE_URL=postgres://user:password@localhost:5432/scheduler cargo run
+DATABASE_URL=postgres://user:password@localhost:5432/scheduler TELEGRAM_BOT_TOKEN='<your BotFather token>' cargo run
 cargo build
 cargo check
 cargo test
@@ -117,6 +144,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+`TELEGRAM_BOT_TOKEN` is required and must belong to the bot launching this Mini App.
+Keep it backend-only; never use a `VITE_*` variable for it.
 `DATABASE_URL` is required for application startup and must point to an existing
 PostgreSQL database; the database user needs schema migration permissions.
 `BIND_ADDRESS` defaults to `127.0.0.1:3000`. Tests create their own databases and
