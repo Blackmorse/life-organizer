@@ -6,7 +6,7 @@ use backend::{
     api::{AppState, router},
     auth::TelegramAuth,
     dao::{PgCategoryDao, PgTaskDao, PgUserDao},
-    db::connect_and_migrate,
+    db::{MIGRATOR, connect_and_migrate},
     domain::User,
     service::{CategoryService, TaskService},
 };
@@ -26,6 +26,15 @@ pub struct TestDb {
 impl TestDb {
     /// Every call creates an isolated container and runs production migrations.
     pub async fn new() -> Self {
+        Self::new_with_version(None).await
+    }
+
+    /// Upgrade tests can populate the real legacy schema before running the rest.
+    pub async fn new_at_version(version: i64) -> Self {
+        Self::new_with_version(Some(version)).await
+    }
+
+    async fn new_with_version(version: Option<i64>) -> Self {
         let container = GenericImage::new("postgres", "16-alpine")
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stdout(
@@ -43,9 +52,28 @@ impl TestDb {
         let host = container.get_host().await.unwrap();
         let port = container.get_host_port_ipv4(5432).await.unwrap();
         let url = format!("postgres://scheduler:test-password@{host}:{port}/scheduler");
-        let pool = connect_and_migrate(&url)
-            .await
-            .expect("connect and migrate test database");
+        let pool = if let Some(version) = version {
+            let pool = PgPool::connect(&url).await.unwrap();
+            let migrator = sqlx::migrate::Migrator {
+                migrations: std::borrow::Cow::Owned(
+                    MIGRATOR
+                        .iter()
+                        .filter(|migration| migration.version <= version)
+                        .cloned()
+                        .collect(),
+                ),
+                ..sqlx::migrate::Migrator::DEFAULT
+            };
+            migrator
+                .run(&pool)
+                .await
+                .expect("apply legacy production migrations");
+            pool
+        } else {
+            connect_and_migrate(&url)
+                .await
+                .expect("connect and migrate test database")
+        };
         let user = PgUserDao::new(pool.clone())
             .get_or_create(TELEGRAM_ID)
             .await

@@ -3,9 +3,108 @@ mod support;
 use backend::{
     dao::{CategoryDao, DaoError, TaskDao},
     db::MIGRATOR,
-    domain::TaskUrgency,
+    domain::{Subtask, TaskUrgency},
 };
 use support::TestDb;
+
+#[tokio::test]
+async fn subtask_completion_migration_preserves_legacy_text_order_and_parent_state() {
+    let db = TestDb::new_at_version(5).await;
+    let category = db.categories().create("Work").await.unwrap();
+    let mut ids = Vec::new();
+    for completed in [false, true] {
+        let id: i64 = sqlx::query_scalar("INSERT INTO tasks (category_id, description, urgency, subtasks, completed) VALUES ($1, 'Legacy task', 'soon', ARRAY['First', 'Second', 'First'], $2) RETURNING id")
+            .bind(category.id).bind(completed).fetch_one(&db.pool).await.unwrap();
+        ids.push(id);
+    }
+    let empty: i64 = sqlx::query_scalar(
+        "INSERT INTO tasks (category_id, description) VALUES ($1, 'Empty task') RETURNING id",
+    )
+    .bind(category.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    MIGRATOR.run(&db.pool).await.unwrap();
+    MIGRATOR.run(&db.pool).await.unwrap();
+    for (id, completed) in ids.into_iter().zip([false, true]) {
+        let task = db.tasks().get(id).await.unwrap().unwrap();
+        assert_eq!(
+            task.subtasks,
+            [
+                Subtask::new("First"),
+                Subtask::new("Second"),
+                Subtask::new("First")
+            ]
+        );
+        assert_eq!(task.completed, completed);
+        assert_eq!(task.urgency, TaskUrgency::Soon);
+        assert_eq!(task.category_id, category.id);
+    }
+    let task = db.tasks().get(empty).await.unwrap().unwrap();
+    assert!(task.subtasks.is_empty());
+    assert!(!task.completed);
+    assert!(
+        db.tasks()
+            .create(category.id, "New task", TaskUrgency::Someday)
+            .await
+            .unwrap()
+            .subtasks
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_edits_and_deletion_cannot_change_a_completing_task() {
+    let db = TestDb::new().await;
+    let category = db.categories().create("Work").await.unwrap();
+    let task = db
+        .tasks()
+        .create(category.id, "Keep this task", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    let mut transaction = db.pool.begin().await.unwrap();
+    sqlx::query("UPDATE tasks SET completed = TRUE WHERE id = $1")
+        .bind(task.id)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let update_dao = db.tasks();
+    let update = tokio::spawn(async move {
+        update_dao
+            .update(task.id, category.id, "Changed", TaskUrgency::Someday)
+            .await
+    });
+    let subtasks_dao = db.tasks();
+    let subtasks = tokio::spawn(async move {
+        subtasks_dao
+            .replace_subtasks(task.id, &[Subtask::new("Changed")])
+            .await
+    });
+    let delete_dao = db.tasks();
+    let delete = tokio::spawn(async move { delete_dao.delete(task.id).await });
+    // Ensure all three writes reached PostgreSQL while completion is uncommitted.
+    // They must wait on the task's row lock, then observe its completed state.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT t.completed%'")
+                .fetch_one(&db.pool).await.unwrap();
+            if waiting == 3 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("edits should wait for the completion row lock");
+    transaction.commit().await.unwrap();
+    assert!(matches!(update.await.unwrap(), Err(DaoError::TaskArchived)));
+    assert!(matches!(
+        subtasks.await.unwrap(),
+        Err(DaoError::TaskArchived)
+    ));
+    assert!(matches!(delete.await.unwrap(), Err(DaoError::TaskArchived)));
+    let stored = db.tasks().get(task.id).await.unwrap().unwrap();
+    assert!(stored.completed);
+    assert_eq!(stored.description, task.description);
+    assert_eq!(stored.urgency, task.urgency);
+    assert!(stored.subtasks.is_empty());
+}
 
 #[tokio::test]
 async fn category_crud_and_missing_rows() {
@@ -156,7 +255,7 @@ async fn schema_enforces_required_fields_and_migrations_are_repeatable() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(applied, 3);
+    assert_eq!(applied, 6);
 }
 
 #[tokio::test]

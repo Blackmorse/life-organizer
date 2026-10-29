@@ -14,6 +14,8 @@ pub enum ServiceError {
     InvalidInput(&'static str),
     #[error("category still contains tasks")]
     Conflict,
+    #[error("archived tasks are read-only; restore the task first")]
+    TaskArchived,
     #[error("storage operation failed")]
     Storage(#[source] DaoError),
 }
@@ -23,6 +25,7 @@ impl From<DaoError> for ServiceError {
         match error {
             DaoError::CategoryMissing => Self::NotFound("category"),
             DaoError::CategoryNotEmpty => Self::Conflict,
+            DaoError::TaskArchived => Self::TaskArchived,
             error => Self::Storage(error),
         }
     }

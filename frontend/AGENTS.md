@@ -15,9 +15,13 @@ standalone browser.
 ## Current functionality
 
 - Read-first category/task hierarchy, with compact rows and expandable details.
+- Active and Archive tabs. Complete moves a task into the archive; Restore returns
+  it to active tasks with its category, urgency, and subtasks intact. Archive has
+  read-only task/subtask details and no task/category editing or creation controls.
+  Counts/search apply only to the selected tab; empty archive categories are hidden.
 - Category CRUD and task counts. Categories start expanded; users can collapse
   individual branches or expand/collapse all categories.
-- Search across category names and task descriptions. Matching branches expand
+- Search across category names, task descriptions, and subtask text. Matching branches expand
   during search; clearing it restores the previous collapse state.
 - Task CRUD and moving tasks between categories. Creation forms appear only
   after explicit add actions. Task edit/delete actions live in expanded details;
@@ -27,9 +31,19 @@ standalone browser.
   explain the planning horizon. New tasks default to Someday.
 - Required descriptions, category selection, loading/saving states, API errors,
   and failed-write draft retention.
+- Ordered subtasks in expanded task details. Add subtask below the list opens a
+  focused text input immediately; a pencil on each row edits its description
+  inline. Save subtask saves the change; Cancel discards it. Failed saves preserve
+  typed text. Each row has a cross for immediate deletion and up/down reorder
+  controls. Other list mutations are disabled while an add/edit draft is open.
+- Subtask completion checkboxes save immediately in read view, with progress counts
+  and completed steps still visible. Completion flags stay with their steps when
+  descriptions change or steps are reordered. A nonempty fully completed list automatically
+  archives the parent using the returned backend task. Empty lists stay active.
+  Archive checkboxes are disabled; Restore preserves progress so steps can be reopened.
 - Backend remains authoritative for validation, relationships, and persistence.
   Nonempty category deletion produces a conflict; tasks are not cascade-deleted.
-- Task completion, subcategories, and implementation plans do not exist yet.
+- Subcategories and implementation plans do not exist yet.
 - Telegram bridge initialization, theme support, and Mini App authorization are
   present. Each API request sends raw signed `initData`; the backend verifies it
   and scopes data to that user. Browser launches without initData show sign-in
@@ -50,6 +64,7 @@ standalone browser.
 | `src/components/CategoryForm.tsx` | Shared on-demand category create/rename form. |
 | `src/components/TaskForm.tsx` | Shared create/edit form with category selection. |
 | `src/components/TaskCard.tsx` | Compact task row, expandable read view, and edit/move/delete actions. |
+| `src/components/Subtasks.tsx` | Numbered checklist, progress, direct add, and per-row inline edit/delete/reorder actions. |
 | `src/telegram.ts` | Optional, isolated Telegram SDK bridge. |
 | `src/theme.tsx` | Material UI palette, typography, defaults, CssBaseline, and live Telegram/OS theme support. |
 | `src/App.test.tsx`, `src/test/` | Component-level behavior tests and shared setup. |
@@ -84,6 +99,23 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
 - Create: POST; update: PUT; delete: DELETE returning 204.
 - Category input: `{ "description": "Work" }`.
 - Task input: `{ "category_id": 1, "description": "Build UI", "urgency": "upcoming" }`.
+- Task responses include `completed: boolean` (false for new tasks). The list API
+  returns active and archived tasks together; the UI partitions them locally.
+  `PUT /tasks/{id}/completion` accepts `{ "completed": true }` to archive or
+  `{ "completed": false }` to restore, returning the updated task. Archived task
+  edits, moves, subtask writes, and deletion return `409`; restore is the only
+  allowed task write. Nonempty category deletion counts archived tasks too.
+  Failed completion/restore requests leave tasks in their current tab for retry.
+- Task responses include `subtasks: { description: string, completed: boolean }[]`
+  in saved order. New tasks have an empty list. `PUT /tasks/{id}/subtasks` accepts
+  `{ "subtasks": [{ "description": "Design", "completed": false }] }` and returns
+  the updated task, including its derived completion state. An empty list clears
+  steps without completing the parent. Saving a nonempty fully completed list
+  archives the parent atomically. Ordinary task updates/moves preserve steps and
+  flags. Steps have no independent IDs, archive, or nested children; parent task
+  deletion removes its steps. List writes remain atomic and last-write-wins.
+  Checkbox/delete/reorder failures keep the server-confirmed list; failed inline
+  add/edit saves retain typed descriptions. Description edits preserve completion.
 - Task responses include urgency (`someday`, `upcoming`, or `soon`). Always send
   urgency on writes, including task moves; omitted API input defaults to Someday.
   Extend the catalog in `src/urgency.ts` alongside the backend enum and a new

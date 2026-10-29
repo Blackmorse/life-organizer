@@ -7,7 +7,7 @@ import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined'
 import MoreHorizIcon from '@mui/icons-material/MoreHoriz'
-import type { Category, Task, TaskInput } from '../types'
+import type { Category, Subtask, Task, TaskInput } from '../types'
 import { CategoryForm } from './CategoryForm'
 import { TaskCard } from './TaskCard'
 import { TaskForm } from './TaskForm'
@@ -17,11 +17,14 @@ interface Props {
   tasks: Task[]
   query: string
   disabled: boolean
+  archived: boolean
   onUpdateCategory: (id: number, description: string) => Promise<boolean>
   onDeleteCategory: (id: number) => Promise<boolean>
   onCreateTask: (input: TaskInput) => Promise<boolean>
   onUpdateTask: (id: number, input: TaskInput) => Promise<boolean>
   onDeleteTask: (id: number) => Promise<boolean>
+  onReplaceSubtasks: (id: number, subtasks: Subtask[]) => Promise<boolean>
+  onSetCompleted: (id: number, completed: boolean) => Promise<boolean>
 }
 
 export function CategoryTree(props: Props) {
@@ -30,8 +33,8 @@ export function CategoryTree(props: Props) {
   const branches = props.categories.map((category) => {
     const tasks = props.tasks.filter((task) => task.category_id === category.id)
     const matchesCategory = category.description.toLocaleLowerCase().includes(query)
-    const matchingTasks = matchesCategory ? tasks : tasks.filter((task) => task.description.toLocaleLowerCase().includes(query))
-    return { category, tasks: matchingTasks, total: tasks.length, visible: matchesCategory || matchingTasks.length > 0 }
+    const matchingTasks = matchesCategory ? tasks : tasks.filter((task) => [task.description, ...task.subtasks.map((step) => step.description)].some((text) => text.toLocaleLowerCase().includes(query)))
+    return { category, tasks: matchingTasks, total: tasks.length, visible: (!props.archived || tasks.length > 0) && (matchesCategory || matchingTasks.length > 0) }
   }).filter((branch) => branch.visible)
 
   function setExpanded(id: number, expanded: boolean) {
@@ -64,8 +67,8 @@ export function CategoryTree(props: Props) {
   )
 }
 
-function CategoryBranch({ category, categories, matchingTasks, total, expanded, searching, setExpanded, disabled,
-  onUpdateCategory, onDeleteCategory, onCreateTask, onUpdateTask, onDeleteTask }: Props & {
+function CategoryBranch({ category, categories, matchingTasks, total, expanded, searching, setExpanded, disabled, archived,
+  onUpdateCategory, onDeleteCategory, onCreateTask, onUpdateTask, onDeleteTask, onReplaceSubtasks, onSetCompleted }: Props & {
   category: Category
   matchingTasks: Task[]
   total: number
@@ -89,7 +92,7 @@ function CategoryBranch({ category, categories, matchingTasks, total, expanded, 
             <Chip size="small" variant="outlined" label={searching && matchingTasks.length !== total ? `${matchingTasks.length}/${total}` : total} sx={{ fontSize: '0.7rem', height: 24 }} />
           </ButtonBase>
         </Typography>
-        <Stack direction="row" sx={{ flexShrink: 0, alignItems: 'center' }}>
+        {!archived && <Stack direction="row" sx={{ flexShrink: 0, alignItems: 'center' }}>
           <IconButton color="primary" disabled={disabled} aria-label={`Add task to ${category.description}`} onClick={() => {
             setExpanded(true)
             setCreatingTask(true)
@@ -106,9 +109,9 @@ function CategoryBranch({ category, categories, matchingTasks, total, expanded, 
                 void onDeleteCategory(category.id)
               }}><ListItemIcon sx={{ color: 'inherit' }}><DeleteOutlineIcon fontSize="small" /></ListItemIcon><ListItemText>Delete category</ListItemText></MenuItem>
           </Menu>
-        </Stack>
+        </Stack>}
       </Stack>
-      {editing && <Paper variant="outlined" sx={{ m: 2, p: 2 }}><CategoryForm initialDescription={category.description} disabled={disabled}
+      {!archived && editing && <Paper variant="outlined" sx={{ m: 2, p: 2 }}><CategoryForm initialDescription={category.description} disabled={disabled}
         onCancel={() => setEditing(false)} onSave={async (description) => {
           const saved = await onUpdateCategory(category.id, description)
           if (saved) setEditing(false)
@@ -116,10 +119,10 @@ function CategoryBranch({ category, categories, matchingTasks, total, expanded, 
         }} /></Paper>}
       <Box id={childrenId} hidden={!expanded} sx={{ display: expanded ? 'block' : 'none', borderLeft: 1, borderColor: 'divider', ml: { xs: 2.5, sm: 3.5 }, mr: { xs: 1, sm: 2 }, pl: 1, mb: 2 }}>
         <List disablePadding aria-label={`Tasks in ${category.description}`}>
-          {matchingTasks.map((task) => <TaskCard key={task.id} task={task} categories={categories} disabled={disabled} onUpdate={onUpdateTask} onDelete={onDeleteTask} />)}
+          {matchingTasks.map((task) => <TaskCard key={task.id} task={task} categories={categories} disabled={disabled} onUpdate={onUpdateTask} onDelete={onDeleteTask} onReplaceSubtasks={onReplaceSubtasks} onSetCompleted={onSetCompleted} />)}
         </List>
         {matchingTasks.length === 0 && <Typography variant="body2" color="text.secondary" sx={{ p: 1.5 }}>No tasks in this category.</Typography>}
-        {creatingTask && <Paper variant="outlined" component="section" sx={{ p: 2, mt: 1 }} aria-label={`New task in ${category.description}`}>
+        {!archived && creatingTask && <Paper variant="outlined" component="section" sx={{ p: 2, mt: 1 }} aria-label={`New task in ${category.description}`}>
           <Typography variant="h3" sx={{ mb: 2 }}>New task</Typography>
           <TaskForm categories={categories} preferredCategoryId={category.id} disabled={disabled} submitLabel="Create task"
             onCancel={() => setCreatingTask(false)} onSave={async (input) => {

@@ -5,8 +5,12 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 ## Features
 
 - Browse an expandable category/task hierarchy, with per-category counts.
+- Complete tasks from expanded details to move them out of the **Active** tab
+  into **Archive**. Archive keeps details and subtasks readable; **Restore** is
+  its only task action. Restore before editing, moving, or deleting a task.
+  Counts and search reflect the selected tab.
 - Open task rows to read full details; collapse branches or expand/collapse all.
-- Search category names and task descriptions; matching branches expand automatically.
+- Search category names, task descriptions, and subtasks; matching branches expand automatically.
 - Create, rename, and delete categories through on-demand forms and action menus.
 - Create, edit, move, and delete tasks without keeping creation forms on screen.
 - Choose task urgency: **Someday** (at some point in the future), **Upcoming**
@@ -14,6 +18,15 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   create/edit forms let you change them.
 - Loading/saving indicators, refresh, empty states, and API errors.
 - Failed writes preserve form contents for retry.
+- Break tasks into ordered subtasks in expanded details. **Add subtask** below the
+  list opens a focused text input. Use each row's pencil to edit, cross to delete,
+  or arrows to reorder. Add/edit forms offer **Save subtask** and **Cancel**;
+  delete and reorder save immediately. Failed saves retain typed text or the
+  existing list. Task rows show completed/total step counts.
+- Check or uncheck subtasks directly in task details. Completed steps stay visible.
+  Completing every step in a nonempty list automatically moves the parent task
+  to Archive. Archive checkboxes are read-only; Restore keeps progress so you can
+  reopen individual steps.
 - Material UI components, responsive layout, light/dark themes, and an optional
   Telegram SDK bridge with live theme updates.
 - Personal workspaces using verified Telegram Mini App authorization. Each user
@@ -22,8 +35,19 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 Tasks have descriptions, categories, and urgency. New and existing tasks default
 to Someday; restarting the backend applies the additive urgency migration
 automatically. These are planning horizons, not enforced due dates.
-Completion status, subcategories, and
-implementation plans are not part of the current backend contract.
+Subcategories and implementation plans are not part of the current backend contract.
+Subtasks are optional ordered descriptions with completion flags, without their
+own urgency or archive. An empty list does not auto-complete a task.
+Restarting the backend applies the additive subtask migration automatically;
+existing tasks start with empty lists. Task edits and category moves preserve steps.
+Completion also preserves task content, urgency, category, and steps. Restarting
+the backend applies migration `0005_task_completion.sql`; existing tasks start
+active. Categories containing archived tasks cannot be deleted until those tasks
+are restored and moved or deleted.
+Migration `0006_subtask_completion.sql` converts existing subtask text to objects
+with `completed: false`, preserving descriptions, order, and parent completion.
+It runs automatically on backend restart. API subtasks are now objects such as
+`{ "description": "Build UI", "completed": false }` rather than plain strings.
 
 ## Local development
 

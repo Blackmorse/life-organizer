@@ -5,7 +5,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use backend::domain::TaskUrgency;
+use backend::domain::{Subtask, TaskUrgency};
 use serde_json::{Value, json};
 use support::TestDb;
 use tower::ServiceExt;
@@ -49,6 +49,487 @@ async fn request_as(
         serde_json::from_slice(&bytes).unwrap()
     };
     (status, body)
+}
+
+#[tokio::test]
+async fn subtask_completion_automatically_archives_parent_only_for_a_nonempty_finished_list() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Finish steps", TaskUrgency::Upcoming)
+        .await
+        .unwrap();
+    let app = db.app();
+    let path = format!("/tasks/{}", task.id);
+    let steps_path = format!("{path}/subtasks");
+    let completion_path = format!("{path}/completion");
+    let steps = |first, second| {
+        json!([
+            {"description": "Design", "completed": first},
+            {"description": "Build", "completed": second},
+        ])
+    };
+    for (first, second, completed) in [
+        (false, false, false),
+        (true, false, false),
+        (false, false, false),
+        (true, true, true),
+    ] {
+        let input = steps(first, second);
+        let (status, updated) =
+            request(&app, "PUT", &steps_path, Some(json!({"subtasks": input}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["completed"], completed);
+        assert_eq!(updated["subtasks"], input);
+        assert_eq!(updated["urgency"], "upcoming");
+        assert_eq!(updated["category_id"], category.id);
+        assert_eq!(request(&db.app(), "GET", &path, None).await.1, updated);
+        assert_eq!(
+            request(&app, "GET", "/tasks", None).await.1,
+            json!([updated])
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            &steps_path,
+            Some(json!({"subtasks": steps(false, true)}))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "PUT",
+            &steps_path,
+            Some(json!({"subtasks": steps(false, false)}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, restored) = request(
+        &app,
+        "PUT",
+        &completion_path,
+        Some(json!({"completed": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["completed"], false);
+    assert_eq!(restored["subtasks"], steps(true, true));
+    // Restoring keeps the progress so an individual step can be reopened.
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            &steps_path,
+            Some(json!({"subtasks": steps(false, true)}))
+        )
+        .await
+        .1["completed"],
+        false
+    );
+    // Text edits/reorder keep completion flags; new steps start unfinished.
+    let reordered = json!([
+        {"description": "Build edited", "completed": true},
+        {"description": "Design", "completed": false},
+        {"description": "Test", "completed": false},
+    ]);
+    let (_, updated) = request(
+        &app,
+        "PUT",
+        &steps_path,
+        Some(json!({"subtasks": reordered})),
+    )
+    .await;
+    assert_eq!(updated["subtasks"], reordered);
+    assert_eq!(updated["completed"], false);
+    // Deleting unfinished steps also completes a nonempty remaining finished list.
+    let remaining = json!([{"description": "Build edited", "completed": true}]);
+    let (status, archived) = request(
+        &app,
+        "PUT",
+        &steps_path,
+        Some(json!({"subtasks": remaining})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(archived["completed"], true);
+    assert_eq!(archived["subtasks"], remaining);
+    request(
+        &app,
+        "PUT",
+        &completion_path,
+        Some(json!({"completed": false})),
+    )
+    .await;
+    let (status, cleared) = request(&app, "PUT", &steps_path, Some(json!({"subtasks": []}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["completed"], false);
+    assert_eq!(cleared["subtasks"], json!([]));
+}
+
+#[tokio::test]
+async fn task_completion_archives_read_only_tasks_until_restored() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let destination = db.category_service().create("Home").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Build app", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    assert!(!task.completed);
+    let app = db.app();
+    let path = format!("/tasks/{}", task.id);
+    let completion_path = format!("{path}/completion");
+    // Completion does not require subtasks or depend on the planning horizon.
+    for completed in [true, false] {
+        let (status, result) = request(
+            &app,
+            "PUT",
+            &completion_path,
+            Some(json!({"completed": completed})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["completed"], completed);
+    }
+    let task = db
+        .task_service()
+        .replace_subtasks(task.id, &[Subtask::new("Design"), Subtask::new("Build")])
+        .await
+        .unwrap();
+    let mut archived = serde_json::to_value(&task).unwrap();
+    archived["completed"] = json!(true);
+    // Both completion and restoration are idempotent, and only change the flag.
+    for _ in 0..2 {
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                &completion_path,
+                Some(json!({"completed": true}))
+            )
+            .await,
+            (StatusCode::OK, archived.clone())
+        );
+    }
+    assert_eq!(
+        request(&db.app(), "GET", &path, None).await,
+        (StatusCode::OK, archived.clone())
+    );
+    assert_eq!(
+        request(&app, "GET", "/tasks", None).await.1,
+        json!([archived.clone()])
+    );
+    assert_eq!(
+        request(
+            &app,
+            "GET",
+            &format!("/tasks?category_id={}", category.id),
+            None
+        )
+        .await
+        .1,
+        json!([archived.clone()])
+    );
+
+    for (method, target, body) in [
+        (
+            "PUT",
+            path.clone(),
+            Some(
+                json!({"category_id": destination.id, "description": "Changed", "urgency": "someday", "completed": false}),
+            ),
+        ),
+        (
+            "PUT",
+            format!("{path}/subtasks"),
+            Some(json!({"subtasks": []})),
+        ),
+        ("DELETE", path.clone(), None),
+    ] {
+        assert_eq!(
+            request(&app, method, &target, body).await,
+            (
+                StatusCode::CONFLICT,
+                json!({"error": "archived tasks are read-only; restore the task first"})
+            )
+        );
+        assert_eq!(request(&app, "GET", &path, None).await.1, archived);
+    }
+    // Categories with archived tasks cannot be removed either.
+    assert_eq!(
+        request(
+            &app,
+            "DELETE",
+            &format!("/categories/{}", category.id),
+            None
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let other_user = support::TELEGRAM_ID + 1;
+    for completed in [true, false] {
+        assert_eq!(
+            request_as(
+                &app,
+                other_user,
+                "PUT",
+                &completion_path,
+                Some(json!({"completed": completed}))
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                "/tasks/999999/completion",
+                Some(json!({"completed": completed}))
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/tasks/0/completion",
+            Some(json!({"completed": true}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // Rejected completion payloads never alter the archived task.
+    for body in [
+        json!({}),
+        json!({"completed": null}),
+        json!({"completed": "false"}),
+        json!({"completed": 0}),
+        json!({"completed": false, "description": "Changed"}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&completion_path)
+                    .header(
+                        "authorization",
+                        support::authorization_for(support::TELEGRAM_ID),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(request(&app, "GET", &path, None).await.1, archived);
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                &completion_path,
+                Some(json!({"completed": false}))
+            )
+            .await,
+            (StatusCode::OK, serde_json::to_value(&task).unwrap())
+        );
+    }
+    let moved = db
+        .task_service()
+        .update(
+            task.id,
+            destination.id,
+            "Reopened task",
+            TaskUrgency::Upcoming,
+        )
+        .await
+        .unwrap();
+    assert!(!moved.completed);
+    assert_eq!(moved.subtasks, task.subtasks);
+    db.task_service()
+        .replace_subtasks(task.id, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "DELETE", &path, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn ordered_subtasks_are_persisted_validated_and_user_scoped() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Build app", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    assert!(task.subtasks.is_empty());
+    let app = db.app();
+    let path = format!("/tasks/{}/subtasks", task.id);
+    for body in [
+        json!({}),
+        json!({"subtasks": null}),
+        json!({"subtasks": [1]}),
+        json!({"subtasks": "step"}),
+        json!({"subtasks": ["legacy text"]}),
+        json!({"subtasks": [{"description": "Step"}]}),
+        json!({"subtasks": [{"description": "Step", "completed": null}]}),
+        json!({"subtasks": [{"description": "Step", "completed": "true"}]}),
+        json!({"subtasks": [{"description": "Step", "completed": false, "extra": 1}]}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&path)
+                    .header(
+                        "authorization",
+                        support::authorization_for(support::TELEGRAM_ID),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error());
+    }
+    for steps in [
+        json!([
+            Subtask::new("Design"),
+            Subtask::new("Build"),
+            Subtask::new("Test")
+        ]),
+        json!([Subtask::new("Test"), Subtask::new("Design updated")]),
+    ] {
+        let (status, updated) = request(&app, "PUT", &path, Some(json!({"subtasks": steps}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["subtasks"], steps);
+        assert_eq!(updated["urgency"], "soon");
+        assert_eq!(
+            request(&app, "GET", &format!("/tasks/{}", task.id), None)
+                .await
+                .1,
+            updated
+        );
+        assert_eq!(
+            request(&app, "GET", "/tasks", None).await.1,
+            json!([updated])
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            &path,
+            Some(json!({"subtasks": [Subtask::new("Valid"), Subtask::new(" \n\t")]}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/tasks/0/subtasks",
+            Some(json!({"subtasks": []}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/tasks/999999/subtasks",
+            Some(json!({"subtasks": []}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "PUT",
+            &path,
+            Some(json!({"subtasks": [Subtask::new("Stolen")]}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let other = db.category_service().create("Home").await.unwrap();
+    let moved = db
+        .task_service()
+        .update(task.id, other.id, "Moved", TaskUrgency::Upcoming)
+        .await
+        .unwrap();
+    assert_eq!(
+        moved.subtasks,
+        [Subtask::new("Test"), Subtask::new("Design updated")]
+    );
+    // Invalid writes leave the whole list intact, including direct SQL writes.
+    for invalid in [
+        json!([Subtask::new("Valid"), Subtask::new("  ")]),
+        json!([null]),
+        json!(["step"]),
+        json!({}),
+        json!([[Subtask::new("Nested")]]),
+        json!([{"description": "Step"}]),
+        json!([{"description": "Step", "completed": "true"}]),
+        json!([{"description": "Step", "completed": false, "extra": 1}]),
+    ] {
+        let error = sqlx::query("UPDATE tasks SET subtasks = $2 WHERE id = $1")
+            .bind(task.id)
+            .bind(sqlx::types::Json(invalid))
+            .execute(&db.pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("23514")
+        );
+    }
+    assert_eq!(
+        db.task_service().get(task.id).await.unwrap().subtasks,
+        moved.subtasks
+    );
+    let (status, cleared) = request(&app, "PUT", &path, Some(json!({"subtasks": []}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["subtasks"], json!([]));
+    db.task_service().delete(task.id).await.unwrap();
+    assert_eq!(
+        request(&app, "PUT", &path, Some(json!({"subtasks": []})))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -354,6 +835,8 @@ async fn every_route_requires_verified_telegram_identity() {
         ("POST", "/tasks"),
         ("GET", "/tasks/1"),
         ("PUT", "/tasks/1"),
+        ("PUT", "/tasks/1/subtasks"),
+        ("PUT", "/tasks/1/completion"),
         ("DELETE", "/tasks/1"),
     ] {
         for header in [

@@ -12,6 +12,8 @@ pub enum DaoError {
     CategoryMissing,
     #[error("category still contains tasks")]
     CategoryNotEmpty,
+    #[error("archived tasks are read-only; restore the task first")]
+    TaskArchived,
     #[error("database operation failed")]
     Database(#[source] sqlx::Error),
 }

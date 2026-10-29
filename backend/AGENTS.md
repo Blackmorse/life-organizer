@@ -15,6 +15,10 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Rust edition 2024; Axum 0.8 HTTP server running on Tokio.
 - SQLx 0.8 provides PostgreSQL pooling, queries, and embedded versioned migrations.
 - Category and task CRUD are implemented through DAO, service, and API layers.
+- Tasks support optional ordered subtasks with descriptions and completion flags,
+  replaced atomically. A nonempty fully completed list auto-completes the parent.
+- Task completion/restoration is implemented. Completed tasks form a read-only
+  archive; restore before editing, moving, changing subtasks, or deleting.
 - Database migrations run automatically before the server accepts requests.
 - Telegram Mini App authentication verifies signed `initData` on every API request.
   Users are registered automatically; category/task operations are user-scoped.
@@ -56,14 +60,28 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   Extend levels by adding a new migration for the check constraint, updating
   the domain enum/string conversion, and updating the frontend urgency catalog.
 - Descriptions must not be blank; they are not unique keys.
+- `tasks.subtasks`: `JSONB NOT NULL DEFAULT '[]'`, an ordered array of
+  `{description: string, completed: boolean}` objects. Migration
+  `0004_task_subtasks.sql` originally introduced `TEXT[]` steps;
+  `0006_subtask_completion.sql` converts existing text to objects, preserving order
+  and duplicates, with `completed: false`. Parent completion state is preserved.
+  A database check enforces an array of objects with exactly these two fields,
+  nonblank descriptions, and boolean flags. SQLx uses `Json<Vec<Subtask>>`.
+  Subtasks have no independent IDs, categories, urgency, archive, or nested children.
+  They inherit the parent's ownership and lifecycle; deleting the task deletes steps.
 - Each task belongs to exactly one category; categories can contain many tasks.
+- `tasks.completed`: `BOOLEAN NOT NULL DEFAULT FALSE`, added by migration
+  `0005_task_completion.sql`. Existing/new tasks start active. Completion preserves
+  description, category, urgency, and subtasks; restoration only resets this flag.
+  Archive is a task state, not a separate table or category.
 - Category owners use internal user IDs, not Telegram IDs. Tasks inherit their
   owner through their category; there is no duplicate task ownership column.
 - Migration `0002_user_ownership.sql` assumes categories are empty. Clear old
   shared tasks/categories before upgrading; no legacy owner is guessed and no
   data is deleted by the migration.
 - `tasks.category_id` is indexed. Tasks can be moved by updating `category_id`.
-- A category containing tasks cannot be deleted. Delete or move its tasks first.
+- A category containing tasks (including archived tasks) cannot be deleted.
+  Restore archived tasks before moving or deleting them.
 - Add new numbered SQL files for schema changes; do not edit migrations already
   applied to persistent databases. SQLx records applied versions and checksums.
 - `build.rs` causes migration changes to trigger recompilation.
@@ -94,12 +112,42 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | PUT | `/categories/{id}` | Replace category description (`200`). |
 | DELETE | `/categories/{id}` | Delete empty category (`204`). |
 | POST | `/tasks` | Create task (`201`). |
-| GET | `/tasks` | List tasks ordered by ID (`200`); optional `?category_id=123`. |
+| GET | `/tasks` | List all active and archived tasks ordered by ID (`200`); optional `?category_id=123`. |
 | GET | `/tasks/{id}` | Read task (`200`). |
 | PUT | `/tasks/{id}` | Replace description and category (`200`). |
 | DELETE | `/tasks/{id}` | Delete task (`204`). |
+| PUT | `/tasks/{id}/subtasks` | Replace ordered subtasks and return updated task (`200`). |
+| PUT | `/tasks/{id}/completion` | Complete/archive or restore task; return updated task (`200`). |
 
 Category POST/PUT JSON: `{"description":"Work"}`.
+Completion PUT JSON: `{"completed":true}` archives; `{"completed":false}` restores.
+This endpoint requires a boolean and rejects unknown fields. Both operations are
+idempotent and user-scoped. Task responses always include `completed`; ordinary
+task POST creates an active task and PUT does not change completion state.
+Task GET/list include archived data so clients can display a separate archive.
+Archived tasks reject ordinary PUT (including category/urgency changes), subtask
+replacement, and DELETE with `409` and
+`{"error":"archived tasks are read-only; restore the task first"}`. Inaccessible
+tasks still return `404`. DAO writes lock the user-owned task row in a transaction
+before checking state, serializing edits/deletes against completion; a preceding
+service-layer lookup alone would allow racing writes to mutate archived tasks.
+Subtasks PUT JSON:
+`{"subtasks":[{"description":"Design schema","completed":true},{"description":"Build UI","completed":false}]}`.
+Send an empty list to remove all subtasks. The field is required on this route;
+every step requires a string description and boolean completed flag. Unknown step
+fields, legacy string entries, null, and malformed objects are rejected. Every
+description must be nonblank. New UI steps start with `completed: false`.
+Task responses always include `subtasks` (an empty array by default). Ordinary
+task POST creates an empty list; ordinary task PUT preserves existing subtasks,
+including when moving categories. List replacement is atomic and last-write-wins.
+Saving a nonempty list where every step is complete also sets parent `completed`
+to true in the same database write. This includes deleting the last unfinished
+step from a list with finished steps remaining. Empty lists stay active. Finished
+steps remain in place; they have no separate archive and can be unchecked while
+the parent is active. Archived parents still reject all subtask writes with `409`.
+Restore preserves subtask flags and leaves the task active; a subsequent subtask
+write recalculates completion. Manual parent completion does not change step flags.
+The same ownership checks apply; missing/inaccessible parent tasks return `404`.
 Task POST/PUT JSON: `{"category_id":1,"description":"Build backend","urgency":"upcoming"}`.
 Task responses always include `urgency`. Omitted urgency defaults to `someday`
 on both POST and PUT (PUT replaces the task); null and unknown values are rejected
@@ -108,7 +156,7 @@ Responses include generated `id` fields. IDs must be positive. A nonexistent
 category filter returns an empty list. Category responses also include `user_id`.
 
 Service errors use `{"error":"message"}`: invalid input `400`, missing entity or
-referenced category `404`, nonempty category deletion `409`, storage failure
+referenced category `404`, nonempty category deletion or archived task write `409`, storage failure
 `500` with no database details exposed. Malformed JSON/path/query inputs use
 Axum's extractor rejection responses (including `400`, `415`, and `422`).
 

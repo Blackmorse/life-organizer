@@ -35,6 +35,11 @@ There are three logical app components but initially only two subprojects:
   their planning horizon: Someday, Upcoming (weeks), or Soon (days).
 - **Categories and subcategories:** Hierarchical organization of tasks.
 - **Implementation plans:** Plans describing how to carry out a task.
+- **Subtasks:** Optional ordered steps with descriptions and completion flags,
+  managed as a single list. Completed steps stay visible; completing every step
+  in a nonempty list automatically completes the parent task.
+- **Completion/archive:** Completing a task moves it out of the active view into
+  a read-only archive. Restore is the only allowed change to an archived task.
 - **Notifications:** Telegram messages about relevant tasks or events; detailed notification behavior is not yet defined.
 
 ## Current repository stage
@@ -44,13 +49,23 @@ Category and task CRUD are available through DAO, service, and HTTP API layers.
 Users have surrogate IDs and unique Telegram IDs; each category belongs to one
 user, and tasks inherit ownership from their category. The API verifies signed
 Telegram Mini App `initData` and scopes every operation to that user.
-Each task belongs to exactly one category. Versioned SQLx migrations run at
+Each task belongs to exactly one category. Each task can contain an ordered
+subtask list,
+with completion flags and atomic list replacement through a user-scoped API.
+Saving a nonempty fully completed subtask list automatically completes the parent.
+Completion archives tasks;
+archived task edits, moves, subtask writes, and deletion are rejected until restored.
+Versioned SQLx migrations run at
 startup. Database-backed integration tests use a fresh Testcontainers PostgreSQL
 container per test. Backend-specific architecture, API contract, testing rules,
 and build/run/test commands live in `backend/AGENTS.md`.
 
 `frontend/` is a React/TypeScript/Vite app using Material UI, with a read-first,
-searchable category/task hierarchy, CRUD, and task reassignment. It uses a
+searchable category/task hierarchy, CRUD, task reassignment, and ordered subtask
+editing/reordering with completion checkboxes
+and progress counts in task details. Active
+and Archive tabs separate unfinished and completed tasks; archive details allow
+only restoration. It uses a
 same-origin development API proxy to the Rust backend. The Telegram SDK bridge
 provides signed authorization data and theme support. Browser launches without
 Telegram credentials show sign-in guidance. Frontend architecture, commands, and testing

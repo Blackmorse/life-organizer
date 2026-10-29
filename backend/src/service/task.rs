@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     dao::TaskDao,
-    domain::{Task, TaskUrgency},
+    domain::{Subtask, Task, TaskUrgency},
 };
 
 use super::{ServiceError, validate_description, validate_id};
@@ -66,5 +66,28 @@ impl TaskService {
         } else {
             Err(ServiceError::NotFound("task"))
         }
+    }
+
+    pub async fn set_completed(&self, id: i64, completed: bool) -> Result<Task, ServiceError> {
+        validate_id(id)?;
+        self.dao
+            .set_completed(id, completed)
+            .await?
+            .ok_or(ServiceError::NotFound("task"))
+    }
+
+    pub async fn replace_subtasks(
+        &self,
+        id: i64,
+        subtasks: &[Subtask],
+    ) -> Result<Task, ServiceError> {
+        validate_id(id)?;
+        for subtask in subtasks {
+            validate_description(&subtask.description)?;
+        }
+        self.dao
+            .replace_subtasks(id, subtasks)
+            .await?
+            .ok_or(ServiceError::NotFound("task"))
     }
 }

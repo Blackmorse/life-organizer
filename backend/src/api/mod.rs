@@ -40,6 +40,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/tasks", get(task::list).post(task::create))
         .route(
+            "/tasks/{id}/completion",
+            axum::routing::put(task::set_completed),
+        )
+        .route(
+            "/tasks/{id}/subtasks",
+            axum::routing::put(task::replace_subtasks),
+        )
+        .route(
             "/tasks/{id}",
             get(task::get).put(task::update).delete(task::delete),
         )

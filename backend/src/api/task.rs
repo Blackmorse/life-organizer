@@ -6,7 +6,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    domain::{Task, TaskUrgency},
+    domain::{Subtask, Task, TaskUrgency},
     service::ServiceError,
 };
 
@@ -23,6 +23,35 @@ pub struct TaskInput {
 #[derive(Deserialize)]
 pub struct TaskFilter {
     category_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SubtasksInput {
+    subtasks: Vec<Subtask>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionInput {
+    completed: bool,
+}
+
+pub async fn set_completed(
+    Extension(state): Extension<Workspace>,
+    Path(id): Path<i64>,
+    Json(input): Json<CompletionInput>,
+) -> Result<Json<Task>, ServiceError> {
+    Ok(Json(state.tasks.set_completed(id, input.completed).await?))
+}
+
+pub async fn replace_subtasks(
+    Extension(state): Extension<Workspace>,
+    Path(id): Path<i64>,
+    Json(input): Json<SubtasksInput>,
+) -> Result<Json<Task>, ServiceError> {
+    Ok(Json(
+        state.tasks.replace_subtasks(id, &input.subtasks).await?,
+    ))
 }
 
 pub async fn create(

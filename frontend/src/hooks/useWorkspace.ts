@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, AuthorizationError } from '../api'
-import type { Category, Task, TaskInput } from '../types'
+import type { Category, Subtask, Task, TaskInput } from '../types'
 
 export function useWorkspace() {
   const [categories, setCategories] = useState<Category[]>([])
@@ -82,6 +82,14 @@ export function useWorkspace() {
     deleteTask: (id: number) => mutate(async () => {
       await api.deleteTask(id)
       setTasks((items) => items.filter((item) => item.id !== id))
+    }),
+    replaceSubtasks: (id: number, subtasks: Subtask[]) => mutate(async () => {
+      const task = await api.replaceSubtasks(id, subtasks)
+      setTasks((items) => items.map((item) => item.id === id ? task : item))
+    }),
+    setCompleted: (id: number, completed: boolean) => mutate(async () => {
+      const task = await api.setCompleted(id, completed)
+      setTasks((items) => items.map((item) => item.id === id ? task : item))
     }),
   }
 }

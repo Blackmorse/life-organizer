@@ -17,7 +17,7 @@ impl IntoResponse for ServiceError {
         let status = match &self {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::InvalidInput(_) => StatusCode::BAD_REQUEST,
-            Self::Conflict => StatusCode::CONFLICT,
+            Self::Conflict | Self::TaskArchived => StatusCode::CONFLICT,
             Self::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let error = if let Self::Storage(source) = &self {

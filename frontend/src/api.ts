@@ -1,4 +1,4 @@
-import type { Category, Task, TaskInput } from './types'
+import type { Category, Subtask, Task, TaskInput } from './types'
 import { getTelegramInitData } from './telegram'
 
 export class AuthorizationError extends Error {}
@@ -33,7 +33,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown, signal?:
     } catch {
       // Axum extractor errors and development proxy failures can be plain text.
     }
-    if (response.status === 409) message += '. Move or delete its tasks first.'
+    if (response.status === 409 && path.startsWith('/categories/')) message += '. Move or delete its active tasks first; restore archived tasks before moving or deleting them.'
     if (response.status >= 500) message = 'The API is unavailable. Check the Rust server and database, then retry.'
     throw new Error(message)
   }
@@ -49,5 +49,7 @@ export const api = {
   listTasks: (signal?: AbortSignal) => request<Task[]>('/tasks', 'GET', undefined, signal),
   createTask: (input: TaskInput) => request<Task>('/tasks', 'POST', input),
   updateTask: (id: number, input: TaskInput) => request<Task>(`/tasks/${id}`, 'PUT', input),
+  replaceSubtasks: (id: number, subtasks: Subtask[]) => request<Task>(`/tasks/${id}/subtasks`, 'PUT', { subtasks }),
+  setCompleted: (id: number, completed: boolean) => request<Task>(`/tasks/${id}/completion`, 'PUT', { completed }),
   deleteTask: (id: number) => request<void>(`/tasks/${id}`, 'DELETE'),
 }

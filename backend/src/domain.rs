@@ -19,6 +19,24 @@ pub struct Task {
     pub category_id: i64,
     pub description: String,
     pub urgency: TaskUrgency,
+    pub subtasks: Vec<Subtask>,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subtask {
+    pub description: String,
+    pub completed: bool,
+}
+
+impl Subtask {
+    pub fn new(description: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            completed: false,
+        }
+    }
 }
 
 /// Planning horizon, independent of task category or completion status.
