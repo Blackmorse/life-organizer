@@ -182,6 +182,21 @@ impl TaskDao for PgTaskDao {
         if !self.lock_active_task(&mut transaction, id).await? {
             return Ok(None);
         }
+        let Json(previous): Json<Vec<Subtask>> =
+            sqlx::query_scalar("SELECT subtasks FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let mut seen = std::collections::HashSet::new();
+        for step_id in subtasks.iter().filter_map(|step| step.id.as_ref()) {
+            if !seen.insert(step_id)
+                || !previous
+                    .iter()
+                    .any(|step| step.id.as_ref() == Some(step_id))
+            {
+                return Err(DaoError::InvalidSubtaskIds);
+            }
+        }
         // Empty lists do not complete tasks. Save steps and derived parent state
         // in the same write, under the existing archive/ownership row lock.
         let completed = !subtasks.is_empty() && subtasks.iter().all(|step| step.completed);
@@ -192,6 +207,8 @@ impl TaskDao for PgTaskDao {
             .bind(completed)
             .fetch_optional(&mut *transaction)
             .await?;
+        sqlx::query("DELETE FROM daily_tasks d WHERE d.task_id = $1 AND d.subtask_id <> '' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements($2::jsonb) s WHERE s->>'id' = d.subtask_id)")
+            .bind(id).bind(Json(subtasks)).execute(&mut *transaction).await?;
         transaction.commit().await?;
         row.map(task).transpose()
     }

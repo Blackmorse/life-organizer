@@ -1,14 +1,15 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { AppTheme } from './theme'
-import type { Category, Subtask, Task } from './types'
+import type { Category, DailyTask, Subtask, Task } from './types'
 
 // Component-level tests run the real client and hook against a fake HTTP boundary.
 function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) {
   let categories = [...initialCategories]
   let tasks = [...initialTasks]
+  let daily: DailyTask[] = []
   let nextId = 100
   const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
     expect(new Headers(options?.headers).get('Authorization')).toBe('tma signed-test-init-data')
@@ -16,6 +17,21 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) 
     const [, , resource, rawId, child] = url.split('/')
     const id = Number(rawId)
     const input = options?.body ? JSON.parse(String(options.body)) : undefined
+    if (resource === 'daily-tasks') {
+      if (rawId === 'finalize' && method === 'POST') return new Response(null, { status: 204 })
+      daily = daily.filter((item) => item.expires_at > Date.now())
+      if (method === 'POST') {
+        const task = tasks.find((item) => item.id === input.task_id)!
+        const step = input.subtask_index === undefined ? undefined : task.subtasks[input.subtask_index]
+        if (step && !step.id) step.id = String(nextId++)
+        const subtask_id = step?.id ?? ''
+        if (!daily.some((item) => item.task_id === task.id && item.subtask_id === subtask_id)) {
+          daily.push({ task_id: task.id, subtask_id, expires_at: Date.now() + 86_400_000 })
+        }
+      }
+      if (method === 'DELETE') daily = daily.filter((item) => item.task_id !== input.task_id || item.subtask_id !== input.subtask_id)
+      return Response.json(daily)
+    }
     if (resource === 'categories') {
       if (method === 'GET') return Response.json(categories)
       if (method === 'POST') {
@@ -76,6 +92,179 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: `Actions for category ${category}` }))
     await user.click(await screen.findByRole('menuitem', { name: action }))
   }
+
+  it('finalizes all daily picks regardless of search, disables duplicate sends, and keeps list editable', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await screen.findByRole('button', { name: 'View task Build' })
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeDisabled()
+    await user.click(screen.getByRole('tab', { name: 'Active' }))
+    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    await user.type(screen.getByRole('searchbox'), 'no match')
+    const button = screen.getByRole('button', { name: 'Finalize tasks' })
+    expect(button).toBeEnabled()
+    let finish!: (response: Response) => void
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve }))
+    await user.dblClick(button)
+    expect(button).toBeDisabled()
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')).toHaveLength(1)
+    await act(async () => { finish(new Response(null, { status: 204 })) })
+    expect(await screen.findByText("Today's tasks sent to your Telegram bot chat.")).toBeInTheDocument()
+    expect(button).toBeEnabled()
+    expect(fetchMock).toHaveBeenCalledWith('/api/daily-tasks/finalize', expect.objectContaining({ method: 'POST', body: undefined }))
+    await user.click(screen.getByRole('button', { name: 'Clear search' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
+    expect(button).toBeDisabled()
+    expect(screen.queryByText("Today's tasks sent to your Telegram bot chat.")).not.toBeInTheDocument()
+  })
+
+  it('shows bot start and delivery guidance on finalize failures, preserving picks for retry', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    for (const [status, error] of [
+      [400, "Open the bot's private chat and send /start."],
+      [502, 'Could not confirm Telegram delivery. Check the bot chat before retrying; some messages may already have arrived.'],
+    ] as const) {
+      fetchMock.mockResolvedValueOnce(Response.json({ error }, { status }))
+      await user.click(screen.getByRole('button', { name: 'Finalize tasks' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(error)
+      expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeInTheDocument()
+      expect(screen.queryByText("Today's tasks sent to your Telegram bot chat.")).not.toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('button', { name: 'Finalize tasks' }))
+    expect(await screen.findByText("Today's tasks sent to your Telegram bot chat.")).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('tracks task and subtask picks, keeps reordered edits linked, and completes original work', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [
+        { description: 'Design', completed: false }, { description: 'Ship', completed: false },
+      ] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Ship' }))
+    await user.click(screen.getByRole('button', { name: 'Move subtask 2 up' }))
+    await user.click(screen.getByRole('button', { name: 'Edit subtask 1' }))
+    await user.clear(screen.getByRole('textbox', { name: 'Subtask description' }))
+    await user.type(screen.getByRole('textbox', { name: 'Subtask description' }), 'Release')
+    await user.click(screen.getByRole('button', { name: 'Save subtask' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).not.toBeChecked()
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Design' })).not.toBeInTheDocument()
+    const sends = () => fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')
+    expect(sends()).toHaveLength(0)
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Release' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).toBeChecked()
+    expect(sends()).toHaveLength(1)
+    expect(fetchMock.mock.calls.slice(-2).map(([url]) => url)).toEqual(['/api/tasks/1/subtasks', '/api/daily-tasks/finalize'])
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Release' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).not.toBeChecked()
+    expect(sends()).toHaveLength(2)
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Release' }))
+    expect(sends()).toHaveLength(3)
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).toBeChecked()
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Build' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).toBeDisabled()
+    expect(sends()).toHaveLength(4)
+    expect(fetchMock.mock.calls.slice(-2).map(([url]) => url)).toEqual(['/api/tasks/1/completion', '/api/daily-tasks/finalize'])
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Release' }))
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Release' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Archive' }))
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    expect(screen.getByRole('checkbox', { name: 'Subtask 1: Release' })).toBeChecked()
+    expect(fetchMock).toHaveBeenCalledWith('/api/daily-tasks', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ task_id: 1, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    }))
+  })
+
+  it('sends only after completion saves and retains saved progress when automatic delivery fails', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    const checkbox = screen.getByRole('checkbox', { name: 'Complete daily Build' })
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')).toHaveLength(0)
+
+    const handleRequest = fetchMock.getMockImplementation()!
+    let finish!: (response: Response) => void
+    fetchMock.mockImplementation(async (url, options) => url === '/api/daily-tasks/finalize'
+      ? new Promise<Response>((resolve) => { finish = resolve })
+      : handleRequest(url, options))
+    await user.click(checkbox)
+    expect(checkbox).toBeChecked()
+    expect(checkbox).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeDisabled()
+    await act(async () => { finish(Response.json({ error: 'Check the bot chat before retrying; some messages may already have arrived.' }, { status: 502 })) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Progress saved, but the Telegram summary could not be sent.')
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the bot chat before retrying')
+    expect(checkbox).toBeChecked()
+    expect(checkbox).toBeEnabled()
+    fetchMock.mockImplementation(handleRequest)
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Finalize tasks' }))
+    expect(await screen.findByText("Today's tasks sent to your Telegram bot chat.")).toBeInTheDocument()
+  })
+
+  it('resends a picked parent when its last subtask completes from Active', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [{ description: 'Ship', completed: false }] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Subtask 1: Ship' }))
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')).toHaveLength(1)
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeChecked()
+  })
+
+  it('keeps daily picks on failed removal and clears expired picks when app resumes', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The API is unavailable')
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeInTheDocument()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 86_400_001)
+    fireEvent.focus(window)
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Build' })).not.toBeInTheDocument()
+    clock.mockRestore()
+    await user.click(screen.getByRole('tab', { name: 'Active' }))
+    expect(screen.getByRole('button', { name: 'View task Build' })).toBeInTheDocument()
+  })
 
   it('starts with a category/task hierarchy and opens task details without showing creation forms', async () => {
     mockApi([{ id: 1, user_id: 1, description: 'Work' }, { id: 2, user_id: 1, description: 'Home' }], [

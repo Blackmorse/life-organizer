@@ -6,6 +6,8 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import SearchIcon from '@mui/icons-material/Search'
 import { CategoryForm } from './components/CategoryForm'
 import { CategoryTree } from './components/CategoryTree'
+import { DailyTasks } from './components/DailyTasks'
+import { DailyContext } from './components/DailyContext'
 import { useWorkspace } from './hooks/useWorkspace'
 import { initializeTelegram } from './telegram'
 
@@ -14,7 +16,7 @@ export default function App() {
   const workspace = useWorkspace()
   const [query, setQuery] = useState('')
   const [creatingCategory, setCreatingCategory] = useState(false)
-  const [tab, setTab] = useState<'active' | 'archive'>('active')
+  const [tab, setTab] = useState<'active' | 'archive' | 'daily'>('active')
   const archived = tab === 'archive'
   const visibleTasks = workspace.tasks.filter((task) => task.completed === archived)
   const disabled = workspace.loading || workspace.saving
@@ -30,6 +32,7 @@ export default function App() {
   )
 
   return (
+    <DailyContext.Provider value={{ picks: workspace.dailyTasks, select: workspace.selectDailyTask, remove: workspace.removeDailyTask }}>
     <Container maxWidth="md" sx={{
       pt: 'max(24px, var(--tg-content-safe-area-inset-top, 0px))',
       pb: 'max(24px, var(--tg-content-safe-area-inset-bottom, 0px))',
@@ -46,19 +49,20 @@ export default function App() {
       <Divider />
       <Box component="main">
         <Stack direction="row" spacing={2} sx={{ mt: 3, mb: 1, justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h1">{archived ? 'Archive' : 'Your workspace'}</Typography>
-          {!archived && <Button variant="outlined" startIcon={<AddIcon />} disabled={disabled || creatingCategory} onClick={() => setCreatingCategory(true)}>Category</Button>}
+          <Typography variant="h1">{tab === 'daily' ? 'Tasks of the day' : archived ? 'Archive' : 'Your workspace'}</Typography>
+          {tab === 'active' && <Button variant="outlined" startIcon={<AddIcon />} disabled={disabled || creatingCategory} onClick={() => setCreatingCategory(true)}>Category</Button>}
         </Stack>
-        <Tabs aria-label="Task views" value={tab} onChange={(_, value: 'active' | 'archive') => {
+        <Tabs aria-label="Task views" value={tab} variant="scrollable" scrollButtons="auto" onChange={(_, value: 'active' | 'archive' | 'daily') => {
           setTab(value)
           setQuery('')
         }} sx={{ mb: 2 }}>
           <Tab value="active" label="Active" id="active-tab" aria-controls="active-panel" />
+          <Tab value="daily" label="Tasks of the day" id="daily-tab" aria-controls="daily-panel" />
           <Tab value="archive" label="Archive" id="archive-tab" aria-controls="archive-panel" />
         </Tabs>
         {archived && <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Completed tasks are read-only. Restore a task to edit it or move it back to your active workspace.</Typography>}
         <Typography component="div" variant="body2" color="text.secondary" role="status" aria-live="polite" sx={{ mb: 2 }}>
-          {workspace.loading ? 'Loading workspace…' : workspace.saving ? 'Saving changes…' : `${archived ? 'Archived' : 'Active'} · ${visibleTasks.length} ${visibleTasks.length === 1 ? 'task' : 'tasks'}`}
+          {workspace.loading ? 'Loading workspace…' : workspace.saving ? 'Saving changes…' : tab === 'daily' ? 'Today’s task and subtask picks' : `${archived ? 'Archived' : 'Active'} · ${visibleTasks.length} ${visibleTasks.length === 1 ? 'task' : 'tasks'}`}
         </Typography>
         {disabled && <LinearProgress aria-label={workspace.loading ? 'Loading workspace' : 'Saving changes'} sx={{ mb: 2 }} />}
 
@@ -74,7 +78,7 @@ export default function App() {
             endAdornment: query ? <InputAdornment position="end"><IconButton aria-label="Clear search" size="small" onClick={() => setQuery('')}><CloseIcon /></IconButton></InputAdornment> : undefined,
           } }} />
 
-        {!archived && creatingCategory && <Paper variant="outlined" component="section" aria-labelledby="new-category-title" sx={{ p: 2.5, mt: 2 }}>
+        {tab === 'active' && creatingCategory && <Paper variant="outlined" component="section" aria-labelledby="new-category-title" sx={{ p: 2.5, mt: 2 }}>
           <Typography variant="h2" id="new-category-title" sx={{ mb: 2 }}>New category</Typography>
           <CategoryForm disabled={disabled} onCancel={() => setCreatingCategory(false)} onSave={async (description) => {
             const saved = await workspace.createCategory(description)
@@ -87,6 +91,8 @@ export default function App() {
         </Paper>}
 
         <Box role="tabpanel" id={`${tab}-panel`} aria-labelledby={`${tab}-tab`} aria-busy={disabled}>
+          {tab === 'daily' ? <DailyTasks picks={workspace.dailyTasks} tasks={workspace.tasks} categories={workspace.categories} query={query} disabled={disabled}
+            onFinalize={workspace.finalizeDailyTasks} onRemove={workspace.removeDailyTask} onSetCompleted={workspace.setCompleted} onReplaceSubtasks={workspace.replaceSubtasks} /> : <>
           <CategoryTree key={tab} categories={workspace.categories} tasks={visibleTasks} query={query} disabled={disabled} archived={archived}
             onUpdateCategory={workspace.updateCategory} onDeleteCategory={workspace.deleteCategory}
             onCreateTask={async (input) => {
@@ -98,11 +104,13 @@ export default function App() {
             <Typography variant="h2" gutterBottom>{archived ? 'Your archive is empty' : 'Your workspace is empty'}</Typography>
             <Typography variant="body2" color="text.secondary">{archived ? 'Completed tasks will appear here.' : 'Create a category to give your tasks a home.'}</Typography>
           </Box>}
+          </>}
         </Box>
       </Box>
       <Box component="footer" sx={{ borderTop: 1, borderColor: 'divider', mt: 4, pt: 2 }}>
         <Typography variant="caption" color="text.secondary">Explore first. One task at a time.</Typography>
       </Box>
     </Container>
+    </DailyContext.Provider>
   )
 }

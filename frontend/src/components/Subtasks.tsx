@@ -6,8 +6,10 @@ import AddIcon from '@mui/icons-material/Add'
 import CloseIcon from '@mui/icons-material/Close'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import type { Subtask } from '../types'
+import { DailyPickButton } from './DailyTasks'
 
-export function Subtasks({ subtasks, disabled, readOnly = false, onSave }: {
+export function Subtasks({ taskId, subtasks, disabled, readOnly = false, onSave }: {
+  taskId: number
   subtasks: Subtask[]
   disabled: boolean
   readOnly?: boolean
@@ -55,6 +57,7 @@ export function Subtasks({ subtasks, disabled, readOnly = false, onSave }: {
               slotProps={{ input: { 'aria-label': `Subtask ${index + 1}: ${step.description}` } }}
               onChange={(_, completed) => void onSave(subtasks.map((item, position) => position === index ? { ...item, completed } : item))} />} />}
           {!readOnly && <Stack direction="row" sx={{ flexShrink: 0 }}>
+            <DailyPickButton taskId={taskId} step={step} index={index} label={step.description} disabled={actionsDisabled} />
             <IconButton size="small" aria-label={`Move subtask ${index + 1} up`} disabled={actionsDisabled || index === 0} onClick={() => move(index, -1)}><ArrowUpwardIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Move subtask ${index + 1} down`} disabled={actionsDisabled || index === subtasks.length - 1} onClick={() => move(index, 1)}><ArrowDownwardIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Edit subtask ${index + 1}`} disabled={actionsDisabled} onClick={() => setDraft({ index, description: step.description })}><EditOutlinedIcon fontSize="small" /></IconButton>

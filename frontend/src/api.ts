@@ -1,4 +1,4 @@
-import type { Category, Subtask, Task, TaskInput } from './types'
+import type { Category, DailyTask, Subtask, Task, TaskInput } from './types'
 import { getTelegramInitData } from './telegram'
 
 export class AuthorizationError extends Error {}
@@ -34,7 +34,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown, signal?:
       // Axum extractor errors and development proxy failures can be plain text.
     }
     if (response.status === 409 && path.startsWith('/categories/')) message += '. Move or delete its active tasks first; restore archived tasks before moving or deleting them.'
-    if (response.status >= 500) message = 'The API is unavailable. Check the Rust server and database, then retry.'
+    if (response.status >= 500 && !(path === '/daily-tasks/finalize' && response.status === 502)) message = 'The API is unavailable. Check the Rust server and database, then retry.'
     throw new Error(message)
   }
   if (response.status === 204) return undefined as T
@@ -42,6 +42,12 @@ async function request<T>(path: string, method = 'GET', body?: unknown, signal?:
 }
 
 export const api = {
+  finalizeDailyTasks: () => request<void>('/daily-tasks/finalize', 'POST'),
+  listDailyTasks: (signal?: AbortSignal) => request<DailyTask[]>('/daily-tasks', 'GET', undefined, signal),
+  selectDailyTask: (task_id: number, subtask_index?: number) => request<DailyTask[]>('/daily-tasks', 'POST', {
+    task_id, subtask_index, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }),
+  removeDailyTask: (task_id: number, subtask_id: string) => request<DailyTask[]>('/daily-tasks', 'DELETE', { task_id, subtask_id }),
   listCategories: (signal?: AbortSignal) => request<Category[]>('/categories', 'GET', undefined, signal),
   createCategory: (description: string) => request<Category>('/categories', 'POST', { description }),
   updateCategory: (id: number, description: string) => request<Category>(`/categories/${id}`, 'PUT', { description }),

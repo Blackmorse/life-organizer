@@ -8,7 +8,7 @@ use backend::{
     dao::{PgCategoryDao, PgTaskDao, PgUserDao},
     db::{MIGRATOR, connect_and_migrate},
     domain::User,
-    service::{CategoryService, TaskService},
+    service::{CategoryService, MessageSender, NotificationError, TaskService},
 };
 use sqlx::PgPool;
 use testcontainers::{
@@ -102,7 +102,12 @@ impl TestDb {
     }
 
     pub fn app(&self) -> axum::Router {
+        self.app_with_sender(Arc::new(TestSender))
+    }
+
+    pub fn app_with_sender(&self, notifications: Arc<dyn MessageSender>) -> axum::Router {
         router(AppState {
+            notifications,
             pool: self.pool.clone(),
             auth: TelegramAuth::new(BOT_TOKEN),
         })
@@ -110,6 +115,14 @@ impl TestDb {
 }
 
 pub const BOT_TOKEN: &str = "123456:test-only-token";
+
+struct TestSender;
+#[async_trait::async_trait]
+impl MessageSender for TestSender {
+    async fn send(&self, _: i64, _: &[String]) -> Result<(), NotificationError> {
+        panic!("notification tests must inject a recording sender; no live Telegram calls")
+    }
+}
 pub const TELEGRAM_ID: i64 = 7_000_000_001;
 
 pub fn authorization_for(telegram_id: i64) -> String {

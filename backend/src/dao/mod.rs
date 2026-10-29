@@ -1,13 +1,18 @@
 mod category;
+mod daily;
+pub mod morning;
 mod task;
 mod user;
 
 pub use category::{CategoryDao, PgCategoryDao};
+pub use daily::{DailyDao, PgDailyDao};
 pub use task::{PgTaskDao, TaskDao};
 pub use user::PgUserDao;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaoError {
+    #[error("subtask IDs must be unique and belong to the task")]
+    InvalidSubtaskIds,
     #[error("category does not exist")]
     CategoryMissing,
     #[error("category still contains tasks")]

@@ -10,6 +10,30 @@ use serde_json::{Value, json};
 use support::TestDb;
 use tower::ServiceExt;
 
+#[derive(Default)]
+struct RecordingSender {
+    deliveries: std::sync::Mutex<Vec<(i64, Vec<String>)>>,
+    failure: Option<backend::service::NotificationError>,
+}
+
+#[async_trait::async_trait]
+impl backend::service::MessageSender for RecordingSender {
+    async fn send(
+        &self,
+        recipient: i64,
+        messages: &[String],
+    ) -> Result<(), backend::service::NotificationError> {
+        self.deliveries
+            .lock()
+            .unwrap()
+            .push((recipient, messages.to_vec()));
+        match self.failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
 async fn request(
     app: &Router,
     method: &str,
@@ -49,6 +73,360 @@ async fn request_as(
         serde_json::from_slice(&bytes).unwrap()
     };
     (status, body)
+}
+
+#[tokio::test]
+async fn finalizing_sends_only_current_owned_picks_to_verified_telegram_user() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work <&>").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Build", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    db.task_service()
+        .replace_subtasks(task.id, &[Subtask::new("Design"), Subtask::new("Ship 🚀")])
+        .await
+        .unwrap();
+    let expired = db
+        .task_service()
+        .create(category.id, "Expired", TaskUrgency::Someday)
+        .await
+        .unwrap();
+    let sender = std::sync::Arc::new(RecordingSender::default());
+    let app = db.app_with_sender(sender.clone());
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks/finalize", None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(sender.deliveries.lock().unwrap().is_empty());
+    for input in [
+        json!({"task_id":task.id,"subtask_index":1,"timezone":"UTC"}),
+        json!({"task_id":task.id,"timezone":"UTC"}),
+        json!({"task_id":expired.id,"timezone":"UTC"}),
+    ] {
+        assert_eq!(
+            request(&app, "POST", "/daily-tasks", Some(input)).await.0,
+            StatusCode::OK
+        );
+    }
+    sqlx::query("UPDATE daily_tasks SET expires_at = statement_timestamp() - interval '1 second' WHERE task_id = $1")
+        .bind(expired.id).execute(&db.pool).await.unwrap();
+    let mut saved = db.task_service().get(task.id).await.unwrap();
+    saved.subtasks.swap(0, 1);
+    saved.subtasks[0].description = "Release 🚀".into();
+    saved.subtasks[0].completed = true;
+    db.task_service()
+        .replace_subtasks(task.id, &saved.subtasks)
+        .await
+        .unwrap();
+    let picks = request(&app, "GET", "/daily-tasks", None).await.1;
+    // Another user's empty list must not fall back to the first user's picks.
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "POST",
+            "/daily-tasks/finalize",
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(sender.deliveries.lock().unwrap().is_empty());
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks/finalize", None).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+    let deliveries = sender.deliveries.lock().unwrap().clone();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].0, support::TELEGRAM_ID);
+    assert_eq!(
+        deliveries[0].1.concat(),
+        "<b>Tasks for today are ready!</b>\n\n<b>🔹 Build</b>\n\u{a0}\u{a0}\u{a0}\u{a0}✅ Release 🚀\n\n"
+    );
+    assert_eq!(request(&app, "GET", "/daily-tasks", None).await.1, picks);
+    assert!(!db.task_service().get(task.id).await.unwrap().completed);
+    // Finalize means send the current list, not lock it; explicit resends work.
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks/finalize", None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(sender.deliveries.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn finalization_reports_delivery_errors_without_changing_picks() {
+    use backend::service::NotificationError;
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Build", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    request(
+        &db.app(),
+        "POST",
+        "/daily-tasks",
+        Some(json!({"task_id":task.id,"timezone":"UTC"})),
+    )
+    .await;
+    let picks = request(&db.app(), "GET", "/daily-tasks", None).await.1;
+    for (failure, status, message) in [
+        (
+            NotificationError::ChatUnavailable,
+            StatusCode::BAD_REQUEST,
+            "/start",
+        ),
+        (
+            NotificationError::DeliveryFailed,
+            StatusCode::BAD_GATEWAY,
+            "Check the bot chat before retrying",
+        ),
+    ] {
+        let sender = std::sync::Arc::new(RecordingSender {
+            failure: Some(failure),
+            ..Default::default()
+        });
+        let app = db.app_with_sender(sender.clone());
+        let (actual_status, error) = request(&app, "POST", "/daily-tasks/finalize", None).await;
+        assert_eq!(actual_status, status);
+        assert!(error["error"].as_str().unwrap().contains(message));
+        assert_eq!(sender.deliveries.lock().unwrap().len(), 1);
+        assert_eq!(request(&app, "GET", "/daily-tasks", None).await.1, picks);
+    }
+}
+
+#[tokio::test]
+async fn daily_picks_are_scoped_persistent_and_follow_subtask_identity() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Build", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    db.task_service()
+        .replace_subtasks(task.id, &[Subtask::new("Same"), Subtask::new("Same")])
+        .await
+        .unwrap();
+    let app = db.app();
+    let select = json!({"task_id":task.id, "subtask_index":1, "timezone":"Europe/Berlin"});
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "POST",
+            "/daily-tasks",
+            Some(select.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/daily-tasks",
+            Some(json!({"task_id":task.id,"timezone":"Bad/Zone"}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/daily-tasks",
+            Some(json!({"task_id":task.id,"subtask_index":9,"timezone":"UTC"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, picks) = request(&app, "POST", "/daily-tasks", Some(select.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(picks.as_array().unwrap().len(), 1);
+    assert!(!picks[0]["subtask_id"].as_str().unwrap().is_empty());
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks", Some(select))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        request(&db.app(), "GET", "/daily-tasks", None).await.1,
+        picks
+    );
+    assert_eq!(
+        request_as(&app, support::TELEGRAM_ID + 1, "GET", "/daily-tasks", None)
+            .await
+            .1,
+        json!([])
+    );
+    let mut saved = db.task_service().get(task.id).await.unwrap();
+    assert!(saved.subtasks[0].id.is_none());
+    assert_eq!(
+        saved.subtasks[1].id.as_deref(),
+        picks[0]["subtask_id"].as_str()
+    );
+    saved.subtasks.swap(0, 1);
+    saved.subtasks[0].description = "Renamed".into();
+    saved.subtasks[0].completed = true;
+    let updated = db
+        .task_service()
+        .replace_subtasks(task.id, &saved.subtasks)
+        .await
+        .unwrap();
+    assert!(!updated.completed);
+    assert_eq!(request(&app, "GET", "/daily-tasks", None).await.1, picks);
+    let mut forged = saved.subtasks.clone();
+    forged[1].id = forged[0].id.clone();
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            &format!("/tasks/{}/subtasks", task.id),
+            Some(json!({"subtasks":forged}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let whole = json!({"task_id":task.id,"timezone":"Europe/Berlin"});
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks", Some(whole.clone()))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let removal = json!({"task_id":task.id,"subtask_id":""});
+    request_as(
+        &app,
+        support::TELEGRAM_ID + 1,
+        "DELETE",
+        "/daily-tasks",
+        Some(removal.clone()),
+    )
+    .await;
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        request(&app, "DELETE", "/daily-tasks", Some(removal))
+            .await
+            .1,
+        picks
+    );
+    db.task_service()
+        .replace_subtasks(task.id, &[saved.subtasks[1].clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None).await.1,
+        json!([])
+    );
+    request(&app, "POST", "/daily-tasks", Some(whole.clone())).await;
+    sqlx::query("UPDATE daily_tasks SET expires_at = statement_timestamp() - interval '1 second'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None).await.1,
+        json!([])
+    );
+    assert_eq!(
+        db.task_service().get(task.id).await.unwrap().subtasks.len(),
+        1
+    );
+    request(&app, "POST", "/daily-tasks", Some(whole.clone())).await;
+    db.task_service()
+        .set_completed(task.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks", Some(whole)).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    db.task_service()
+        .set_completed(task.id, false)
+        .await
+        .unwrap();
+    db.task_service().delete(task.id).await.unwrap();
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None).await.1,
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn daily_reset_uses_local_two_am_with_calendar_days_and_dst() {
+    let db = TestDb::new().await;
+    for (zone, now, expected) in [
+        ("UTC", "2026-10-29 01:59:59+00", "2026-10-29 02:00:00+00"),
+        ("UTC", "2026-10-29 02:00:00+00", "2026-10-30 02:00:00+00"),
+        (
+            "Asia/Kolkata",
+            "2026-10-29 19:00:00+00",
+            "2026-10-29 20:30:00+00",
+        ),
+        (
+            "Europe/Berlin",
+            "2026-03-28 12:00:00+00",
+            "2026-03-29 01:00:00+00",
+        ),
+        (
+            "Europe/Berlin",
+            "2026-10-24 12:00:00+00",
+            "2026-10-25 01:00:00+00",
+        ),
+        (
+            "Europe/Berlin",
+            "2026-10-25 00:30:00+00",
+            "2026-10-25 01:00:00+00",
+        ),
+        (
+            "Europe/Berlin",
+            "2026-03-29 01:00:00+00",
+            "2026-03-30 00:00:00+00",
+        ),
+    ] {
+        let matches: bool = sqlx::query_scalar(
+            "SELECT daily_reset_at($1, $2::text::timestamptz) = $3::text::timestamptz",
+        )
+        .bind(zone)
+        .bind(now)
+        .bind(expected)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(matches, "{zone}: {now} -> {expected}");
+    }
 }
 
 #[tokio::test]
@@ -826,6 +1204,10 @@ async fn every_route_requires_verified_telegram_identity() {
     let app = db.app();
     for (method, path) in [
         ("GET", "/me"),
+        ("GET", "/daily-tasks"),
+        ("POST", "/daily-tasks/finalize"),
+        ("POST", "/daily-tasks"),
+        ("DELETE", "/daily-tasks"),
         ("GET", "/categories"),
         ("POST", "/categories"),
         ("GET", "/categories/1"),

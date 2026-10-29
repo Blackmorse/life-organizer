@@ -1,19 +1,22 @@
 mod auth;
 mod category;
+mod daily;
 mod error;
 mod task;
 
 use axum::{Extension, Json, Router, middleware, routing::get};
 use sqlx::PgPool;
+use std::sync::Arc;
 
 use crate::{
     auth::TelegramAuth,
     domain::User,
-    service::{CategoryService, TaskService},
+    service::{CategoryService, DailyService, MessageSender, TaskService},
 };
 
 #[derive(Clone)]
 pub struct AppState {
+    pub notifications: Arc<dyn MessageSender>,
     pub pool: PgPool,
     pub auth: TelegramAuth,
 }
@@ -21,6 +24,7 @@ pub struct AppState {
 /// Services are constructed only after verification, with immutable user-scoped DAOs.
 #[derive(Clone)]
 pub(super) struct Workspace {
+    pub daily: DailyService,
     pub categories: CategoryService,
     pub tasks: TaskService,
 }
@@ -39,6 +43,14 @@ pub fn router(state: AppState) -> Router {
                 .delete(category::delete),
         )
         .route("/tasks", get(task::list).post(task::create))
+        .route(
+            "/daily-tasks",
+            get(daily::list).post(daily::select).delete(daily::remove),
+        )
+        .route(
+            "/daily-tasks/finalize",
+            axum::routing::post(daily::finalize),
+        )
         .route(
             "/tasks/{id}/completion",
             axum::routing::put(task::set_completed),

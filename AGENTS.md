@@ -40,7 +40,7 @@ There are three logical app components but initially only two subprojects:
   in a nonempty list automatically completes the parent task.
 - **Completion/archive:** Completing a task moves it out of the active view into
   a read-only archive. Restore is the only allowed change to an archived task.
-- **Notifications:** Telegram messages about relevant tasks or events; detailed notification behavior is not yet defined.
+- **Notifications:** Daily-list summaries and an 08:00 offer to carry unfinished picks into the new day through Yes/No bot buttons.
 
 ## Current repository stage
 
@@ -74,10 +74,32 @@ rules live in `frontend/AGENTS.md`; local setup is in `frontend/README.md`.
 Rust, React, TypeScript, Vite, Material UI, npm, PostgreSQL, Axum, Tokio, and SQLx are decided.
 Telegram Mini App authentication is implemented; standalone browser login,
 deployment, and schemas for future features remain undecided.
-Telegram bot messaging, subcategories, and
-implementation plans are not implemented yet.
+Outbound Telegram bot messaging is implemented for daily-list finalization,
+using a shared reqwest client inside the backend. A background worker preserves
+unfinished expired picks, offers them at 08:00 in their saved device timezone,
+and polls Telegram Yes/No callbacks. PostgreSQL stores offers and polling progress;
+an advisory lock selects one worker. Subcategories and implementation
+plans are not implemented yet.
 
 ## Guidance for future changes
+
+Tasks of the day are implemented: users select whole active tasks or individual
+subtasks with calendar buttons, then track completion in a dedicated tab.
+Selections persist in PostgreSQL and expire at the next 02:00 in the device's
+IANA timezone supplied when adding each pick. Expiry removes selections only;
+original work and progress remain. Selected subtasks receive stable, task-owned
+IDs so edits and reordering preserve their daily links.
+The daily tab's Finalize tasks button sends the current server-resolved list to
+the authenticated user's private bot chat. Finalization does not lock or complete
+tasks; users can edit and explicitly resend. Users must start/unblock the bot.
+The Mini App also resends the current summary after saved completion changes
+affect daily picks. Delivery failure preserves saved progress and allows manual
+resending through Finalize tasks.
+At 08:00, the bot offers unfinished picks from the previous daily list with Yes/No
+buttons. Yes restores only still-unfinished owned work, without duplicating current
+picks; No dismisses the offer. Offers expire at the next local 02:00. The backend
+must be running; after downtime it sends still-valid due offers. Bot-restored picks
+appear when reopening or refreshing the Mini App.
 
 - Preserve the two-subproject monorepo structure unless explicitly asked to change it.
 - Keep the bot within the backend initially.

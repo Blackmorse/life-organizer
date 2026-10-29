@@ -7,6 +7,7 @@ export interface Category {
 }
 
 export interface Subtask {
+  id?: string
   description: string
   completed: boolean
 }
@@ -21,3 +22,9 @@ export interface Task {
 }
 
 export type TaskInput = Omit<Task, 'id' | 'subtasks' | 'completed'>
+
+export interface DailyTask {
+  task_id: number
+  subtask_id: string
+  expires_at: number
+}

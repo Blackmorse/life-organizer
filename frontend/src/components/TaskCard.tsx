@@ -10,6 +10,7 @@ import type { Category, Subtask, Task, TaskInput } from '../types'
 import { TaskForm } from './TaskForm'
 import { TASK_URGENCIES } from '../urgency'
 import { Subtasks } from './Subtasks'
+import { DailyPickButton } from './DailyTasks'
 
 export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onReplaceSubtasks, onSetCompleted }: {
   task: Task
@@ -26,14 +27,17 @@ export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onRep
   const urgency = TASK_URGENCIES[task.urgency]
   return (
     <ListItem disablePadding sx={{ display: 'block' }}>
+      <Stack direction="row" sx={{ alignItems: 'center' }}>
       <ButtonBase aria-label={`View task ${task.description}`} aria-expanded={expanded} aria-controls={`task-${task.id}-details`}
-        onClick={() => setExpanded(!expanded)} sx={{ display: 'flex', width: '100%', minHeight: 44, p: 1, gap: 1, textAlign: 'left', borderRadius: 1, '&:hover': { bgcolor: 'action.hover' } }}>
+        onClick={() => setExpanded(!expanded)} sx={{ display: 'flex', flex: 1, minWidth: 0, minHeight: 44, p: 1, gap: 1, textAlign: 'left', borderRadius: 1, '&:hover': { bgcolor: 'action.hover' } }}>
         {expanded ? <ExpandMoreIcon fontSize="small" color="action" /> : <ChevronRightIcon fontSize="small" color="action" />}
         <Typography component="span" variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{task.description}</Typography>
         <Chip component="span" size="small" variant="outlined" label={urgency.label} color={urgency.color} title={urgency.description} />
         {task.subtasks.length > 0 && <Typography component="span" variant="caption" color="text.secondary">{task.subtasks.filter((step) => step.completed).length}/{task.subtasks.length} steps</Typography>}
         <Typography component="span" variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>#{task.id}</Typography>
       </ButtonBase>
+      {!task.completed && <DailyPickButton taskId={task.id} label={task.description} disabled={disabled} />}
+      </Stack>
       <Box id={`task-${task.id}-details`} hidden={!expanded} sx={{ display: expanded ? 'block' : 'none', ml: { xs: 0, sm: 3 }, mb: 1 }}>
         <Paper variant="outlined" sx={{ p: 2 }}>
           {editing && !task.completed ? (
@@ -55,7 +59,7 @@ export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onRep
                 <Button size="small" color="error" startIcon={<DeleteOutlineIcon />} disabled={disabled} aria-label={`Delete task ${task.description}`} onClick={() => void onDelete(task.id)}>Delete</Button>
                 </>}
               </Stack>
-              <Subtasks subtasks={task.subtasks} disabled={disabled} readOnly={task.completed} onSave={(steps) => onReplaceSubtasks(task.id, steps)} />
+              <Subtasks taskId={task.id} subtasks={task.subtasks} disabled={disabled} readOnly={task.completed} onSave={(steps) => onReplaceSubtasks(task.id, steps)} />
             </>
           )}
         </Paper>

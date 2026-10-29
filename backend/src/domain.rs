@@ -6,6 +6,24 @@ pub struct User {
     pub telegram_id: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyTask {
+    pub task_id: i64,
+    /// Empty for a whole-task selection.
+    pub subtask_id: String,
+    pub expires_at: i64,
+}
+
+/// A current, user-owned daily pick resolved in a single database snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyTaskSummary {
+    pub task_id: i64,
+    pub category: String,
+    pub task: String,
+    pub subtask: Option<String>,
+    pub completed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Category {
     pub id: i64,
@@ -26,6 +44,8 @@ pub struct Task {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subtask {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub description: String,
     pub completed: bool,
 }
@@ -33,6 +53,7 @@ pub struct Subtask {
 impl Subtask {
     pub fn new(description: impl Into<String>) -> Self {
         Self {
+            id: None,
             description: description.into(),
             completed: false,
         }

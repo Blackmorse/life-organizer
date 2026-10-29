@@ -15,6 +15,10 @@ struct ErrorBody {
 impl IntoResponse for ServiceError {
     fn into_response(self) -> Response {
         let status = match &self {
+            Self::Notification(crate::service::NotificationError::ChatUnavailable) => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::Notification(_) => StatusCode::BAD_GATEWAY,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::InvalidInput(_) => StatusCode::BAD_REQUEST,
             Self::Conflict | Self::TaskArchived => StatusCode::CONFLICT,

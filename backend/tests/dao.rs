@@ -255,7 +255,7 @@ async fn schema_enforces_required_fields_and_migrations_are_repeatable() {
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(applied, 6);
+    assert_eq!(applied as usize, MIGRATOR.iter().count());
 }
 
 #[tokio::test]

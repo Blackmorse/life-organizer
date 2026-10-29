@@ -1,4 +1,8 @@
 mod category;
+mod daily;
+mod notification;
+pub use daily::DailyService;
+pub use notification::{MessageSender, NotificationError};
 mod task;
 
 pub use category::CategoryService;
@@ -8,6 +12,8 @@ use crate::dao::DaoError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
+    #[error(transparent)]
+    Notification(#[from] NotificationError),
     #[error("{0} not found")]
     NotFound(&'static str),
     #[error("{0}")]
@@ -23,6 +29,9 @@ pub enum ServiceError {
 impl From<DaoError> for ServiceError {
     fn from(error: DaoError) -> Self {
         match error {
+            DaoError::InvalidSubtaskIds => {
+                Self::InvalidInput("subtask IDs must be unique and belong to the task")
+            }
             DaoError::CategoryMissing => Self::NotFound("category"),
             DaoError::CategoryNotEmpty => Self::Conflict,
             DaoError::TaskArchived => Self::TaskArchived,
@@ -46,3 +55,4 @@ fn validate_id(id: i64) -> Result<(), ServiceError> {
         Ok(())
     }
 }
+pub(crate) use notification::summary_messages;

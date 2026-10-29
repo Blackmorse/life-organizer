@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, AuthorizationError } from '../api'
-import type { Category, Subtask, Task, TaskInput } from '../types'
+import type { Category, DailyTask, Subtask, Task, TaskInput } from '../types'
 
 export function useWorkspace() {
   const [categories, setCategories] = useState<Category[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
+  const [dailyTasks, setDailyTasks] = useState<DailyTask[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -14,11 +15,12 @@ export function useWorkspace() {
 
   useEffect(() => {
     const controller = new AbortController()
-    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal)])
-      .then(([nextCategories, nextTasks]) => {
+    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal)])
+      .then(([nextCategories, nextTasks, nextDailyTasks]) => {
         if (controller.signal.aborted) return
         setCategories(nextCategories)
         setTasks(nextTasks)
+        setDailyTasks(nextDailyTasks.filter((item) => item.expires_at > Date.now()))
         setAuthorizationRequired(false)
       })
       .catch((cause: unknown) => {
@@ -32,6 +34,19 @@ export function useWorkspace() {
       })
     return () => controller.abort()
   }, [revision])
+
+  useEffect(() => {
+    function expire() { setDailyTasks((items) => items.filter((item) => item.expires_at > Date.now())) }
+    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at))
+    const timer = Number.isFinite(nextExpiry) ? window.setTimeout(expire, Math.max(0, nextExpiry - Date.now())) : undefined
+    window.addEventListener('focus', expire)
+    document.addEventListener('visibilitychange', expire)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('focus', expire)
+      document.removeEventListener('visibilitychange', expire)
+    }
+  }, [dailyTasks])
 
   async function mutate(operation: () => Promise<void>): Promise<boolean> {
     if (mutationInFlight.current || loading || authorizationRequired) return false
@@ -51,8 +66,38 @@ export function useWorkspace() {
     }
   }
 
+  async function applyCompletion(task: Task) {
+    const previous = tasks.find((item) => item.id === task.id)
+    setTasks((items) => items.map((item) => item.id === task.id ? task : item))
+    const pickCompleted = (item: Task, stepId: string) => stepId
+      ? item.subtasks.some((step) => step.id === stepId && (item.completed || step.completed))
+      : item.completed
+    const dailyProgressChanged = previous && dailyTasks.some((pick) =>
+      pick.task_id === task.id && pick.expires_at > Date.now()
+      && (!pick.subtask_id || task.subtasks.some((step) => step.id === pick.subtask_id))
+      && pickCompleted(previous, pick.subtask_id) !== pickCompleted(task, pick.subtask_id))
+    if (!dailyProgressChanged) return
+    try {
+      await api.finalizeDailyTasks()
+    } catch (cause) {
+      // Completion is already saved. Report delivery separately; never undo it.
+      setError(`Progress saved, but the Telegram summary could not be sent. ${errorMessage(cause)} Use Finalize tasks to resend the current list.`)
+      setAuthorizationRequired(cause instanceof AuthorizationError)
+    }
+  }
+
   return {
-    categories, tasks, loading, saving, error, authorizationRequired,
+    categories, tasks, dailyTasks, loading, saving, error, authorizationRequired,
+    finalizeDailyTasks: () => mutate(async () => { await api.finalizeDailyTasks() }),
+    selectDailyTask: (id: number, index?: number) => mutate(async () => {
+      const picks = await api.selectDailyTask(id, index)
+      const nextTasks = await api.listTasks()
+      setTasks(nextTasks)
+      setDailyTasks(picks.filter((item) => item.expires_at > Date.now()))
+    }),
+    removeDailyTask: (id: number, stepId: string) => mutate(async () => {
+      setDailyTasks(await api.removeDailyTask(id, stepId))
+    }),
     refresh: () => {
       if (mutationInFlight.current || loading) return
       setLoading(true)
@@ -85,11 +130,11 @@ export function useWorkspace() {
     }),
     replaceSubtasks: (id: number, subtasks: Subtask[]) => mutate(async () => {
       const task = await api.replaceSubtasks(id, subtasks)
-      setTasks((items) => items.map((item) => item.id === id ? task : item))
+      await applyCompletion(task)
     }),
     setCompleted: (id: number, completed: boolean) => mutate(async () => {
       const task = await api.setCompleted(id, completed)
-      setTasks((items) => items.map((item) => item.id === id ? task : item))
+      await applyCompletion(task)
     }),
   }
 }

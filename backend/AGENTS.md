@@ -22,8 +22,11 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Database migrations run automatically before the server accepts requests.
 - Telegram Mini App authentication verifies signed `initData` on every API request.
   Users are registered automatically; category/task operations are user-scoped.
-- Telegram bot messaging, subcategories, and implementation plans are not
-  implemented yet. The bot messaging library remains undecided.
+- Daily-list finalization sends a summary to the verified user's private Telegram
+  chat through the existing bot token, using reqwest with rustls. A background
+  worker sends 08:00 rollover offers and polls Telegram callback queries for
+  Yes/No responses. Subcategories and implementation plans
+  are not implemented yet.
 
 ### Module layout
 
@@ -32,6 +35,11 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/main.rs` | Bootstrap configuration, shared connection pool, services, listener, and shutdown. |
 | `src/config.rs` | Read environment-based server configuration. |
 | `src/auth.rs` | Telegram initData HMAC verification, freshness checks, and signed identity extraction. |
+| `src/telegram.rs` | Outbound Telegram Bot API adapter, bounded requests, sanitized delivery errors. |
+| `src/telegram/morning.rs` | Morning-offer buttons, callback polling and acknowledgements. |
+| `src/morning.rs` | Morning-offer orchestration, periodic delivery, durable callback processing, singleton worker lifecycle. |
+| `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
+| `src/service/notification.rs` | Transport-independent message sender boundary and daily summary formatting. |
 | `src/api/auth.rs` | Authentication middleware, user registration, and per-user service wiring. |
 | `src/db.rs` | Create the PostgreSQL pool and apply migrations; reused by tests. |
 | `src/domain.rs` | Category and task data types, independent of SQLx and Axum. |
@@ -65,9 +73,13 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   `0004_task_subtasks.sql` originally introduced `TEXT[]` steps;
   `0006_subtask_completion.sql` converts existing text to objects, preserving order
   and duplicates, with `completed: false`. Parent completion state is preserved.
-  A database check enforces an array of objects with exactly these two fields,
-  nonblank descriptions, and boolean flags. SQLx uses `Json<Vec<Subtask>>`.
-  Subtasks have no independent IDs, categories, urgency, archive, or nested children.
+  A database check enforces an array of objects with these required fields and
+  optional string `id`, nonblank descriptions, and boolean flags.
+  SQLx uses `Json<Vec<Subtask>>`.
+  Subtasks may have a stable task-owned string `id`, assigned lazily on first
+  daily selection. Clients must preserve returned IDs on edits and reordering;
+  unknown or duplicate IDs are rejected. Unselected steps may omit `id`.
+  Subtasks have no independent categories, urgency, archive, or nested children.
   They inherit the parent's ownership and lifecycle; deleting the task deletes steps.
 - Each task belongs to exactly one category; categories can contain many tasks.
 - `tasks.completed`: `BOOLEAN NOT NULL DEFAULT FALSE`, added by migration
@@ -106,6 +118,10 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/me` | Current user `{id, telegram_id}` (`200`). |
+| GET | `/daily-tasks` | Current user's unexpired daily picks (`200`). |
+| POST | `/daily-tasks` | Select a whole task or one subtask; return current picks (`200`). |
+| DELETE | `/daily-tasks` | Remove a pick only; return current picks (`200`). |
+| POST | `/daily-tasks/finalize` | Send the current daily list to the verified user's private bot chat (`204`). |
 | POST | `/categories` | Create category (`201`). |
 | GET | `/categories` | List categories ordered by ID (`200`). |
 | GET | `/categories/{id}` | Read category (`200`). |
@@ -120,6 +136,82 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | PUT | `/tasks/{id}/completion` | Complete/archive or restore task; return updated task (`200`). |
 
 Category POST/PUT JSON: `{"description":"Work"}`.
+
+Daily POST JSON: `{"task_id":1,"timezone":"Europe/Berlin"}`; optional
+`"subtask_index":0` selects a zero-based step instead of its parent. The backend
+validates the timezone against PostgreSQL's timezone catalog, locks the owned
+active parent, assigns a stable step ID if needed, and upserts the pick.
+Missing/inaccessible tasks or steps return `404`; archived parents return `409`.
+Daily DELETE JSON: `{"task_id":1,"subtask_id":""}` for a whole-task pick, or use
+the returned string step ID. Removal is idempotent, scoped, and allowed after
+completion. Inputs reject unknown fields. Responses are arrays of
+`{task_id, subtask_id, expires_at}`, where `expires_at` is Unix milliseconds.
+Migration `0007_daily_tasks.sql` adds the daily table and optional step identities.
+Expiry is the next local 02:00 at selection time; calendar-day arithmetic handles
+DST (PostgreSQL standard-time resolution for missing/ambiguous wall times).
+Reads exclude expired picks even when no app was running and lazily clean them.
+Completed picks remain visible until removed/reset. Deleted tasks cascade-delete
+picks; removed steps drop their picks atomically during subtask replacement.
+Task edits/moves and step edits/reordering retain picks. The API hides expired
+picks immediately; a background sweep also physically removes them.
+
+Finalization accepts no input fields: recipient is the authenticated user's
+verified Telegram ID, never a client-supplied chat ID. One user-scoped SQL snapshot
+resolves unexpired picks with current task/subtask descriptions and completion
+flags, ordered by task ID and current subtask order. The application formats a
+HTML "Tasks for today are ready!" list with bold task headings and indented
+selected subtasks. Whole-task picks appear once; when both a task and its steps
+are picked, steps appear below the same heading. Selected work uses 🔹 for
+unfinished picks and ✅ for completed picks. Context-only parents have no status
+emoji. Groups use task IDs so duplicate names stay separate; categories are
+omitted. All descriptions are HTML-escaped. The adapter uses `parse_mode: "HTML"`
+without inline keyboards. Long summaries split at 4096 rendered UTF-16 units,
+preserving full descriptions with balanced tags and intact entities.
+Empty/expired lists return `400` without sending. Unstarted/blocked bot chats return
+`400` with Start/unblock guidance; other delivery errors return sanitized `502`.
+The UI reports success only after all chunks are accepted by Telegram. On partial
+delivery or ambiguous network failure, users are told to check the chat before
+retrying. No application-level automatic retries or exactly-once guarantee;
+explicit repeated finalization sends the current list again. Picks, expiry, and
+task progress are unchanged by finalization. The shared HTTP client has 5-second
+connect and 15-second per-request timeouts and does not follow redirects.
+Bot users must first open the private chat and press Start/send `/start`, and must
+not block the bot. No additional token or chat-ID environment variable is needed.
+
+### Morning carryover offers
+
+Migration `0008_morning_offers.sql` stores the IANA timezone on each daily pick.
+Legacy picks fall back to UTC; selecting them again records the current device
+timezone. A database trigger captures unfinished picks when expired rows are
+deleted or replaced, including lazy API cleanup and selection before the sweep.
+Removed active picks do not create offers. `morning_offers` groups by owner,
+timezone, and reset instant; `morning_offer_items` retains stable task/step links.
+This preserves yesterday's work without keeping it in today's active list.
+
+At 08:00 local time on the reset date, the bot sends the still-unfinished work
+with Yes/No inline buttons. Local calendar arithmetic and PostgreSQL timezone
+rules apply, including DST. Completed/deleted work is filtered again before
+delivery and acceptance. Empty offers send nothing. Yes atomically adds eligible
+picks with their next local 02:00 expiry; already-active picks keep their expiry.
+No consumes the offer without changing picks. Repeated choices are idempotent;
+offers expire at the following local 02:00 and cannot be accepted afterward.
+Task locks serialize acceptance with app edits/completion. Only the owning user's
+callback from their private chat is accepted, using identity returned by Telegram.
+Reopen or refresh the Mini App to load picks restored through the bot.
+
+The backend starts a worker automatically with the existing bot token. It sweeps
+every 30 seconds and polls `getUpdates` every 2 seconds for `callback_query` only.
+A dedicated PostgreSQL advisory-lock session elects one worker per database;
+other instances wait. Keep this token's webhook disabled and do not run another
+poller for the same bot. No webhook endpoint or additional service is required.
+`bot_poll_state` persists the offset after each processed update. Offer decisions
+commit before callback acknowledgement, so replay cannot repeat an acceptance.
+Pending deliveries use a five-minute retry lease. A network failure after Telegram
+accepted a message may produce a duplicate prompt, but its buttons still share one
+idempotent offer. All error logs omit bot URLs/tokens. Shutdown cancels the worker
+and closes its advisory-lock session. The backend must run to send reminders;
+restart catches up only offers still within their validity window.
+
 Completion PUT JSON: `{"completed":true}` archives; `{"completed":false}` restores.
 This endpoint requires a boolean and rejects unknown fields. Both operations are
 idempotent and user-scoped. Task responses always include `completed`; ordinary
@@ -181,6 +273,8 @@ Axum's extractor rejection responses (including `400`, `415`, and `422`).
   Do not share containers or reset tables between tests. Docker must be running.
 - Current tests exercise DAOs, services, and Axum's router in-process against
   real PostgreSQL. They do not launch the backend executable or a network server.
+- Telegram adapter tests use a local mock HTTP server; API tests inject a recording
+  sender. Tests never send real Telegram messages or need a real bot token.
 - Include end-to-end coverage of complete backend workflows as the application develops.
 - End-to-end tests are primarily maintained by the human project owner.
 - Agents must not create, modify, delete, disable, or regenerate end-to-end tests,

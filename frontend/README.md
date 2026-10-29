@@ -5,6 +5,30 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 ## Features
 
 - Browse an expandable category/task hierarchy, with per-category counts.
+- Use calendar buttons beside active tasks or subtasks to add/remove daily picks.
+  **Tasks of the day** shows a checklist linked to the original work. Selected
+  subtasks appear indented beneath their bold parent task name, grouped
+  together per task. Whole-task picks keep their own checkbox and remove button.
+  Completing items updates the original task/subtask; finished picks stay visible for the day.
+  Remove buttons only remove picks. The list clears at the next **2:00 AM** in
+  your device timezone, preserving tasks and progress. Picks persist across reloads
+  and expire even while the app is closed. Timezone is captured when adding each
+  pick; later timezone changes do not move existing expiry times.
+- At **8:00 AM** in that saved device timezone, the bot offers unfinished work
+  from your previous daily list. Press **Yes** to add it to today's list, or **No**
+  to skip. Completed/deleted work is excluded, and existing picks are not duplicated.
+  Offers expire at the next **2:00 AM**. Reopen or **Refresh** the app to see restored
+  picks. The backend must be running; after downtime, still-valid offers are sent.
+- In **Tasks of the day**, press **Finalize tasks** to receive the current list
+  from your bot in Telegram. The HTML message uses bold task names with selected
+  subtasks indented beneath. 🔹 marks unfinished picks; ✅ marks completed picks.
+  Whole-task picks appear once; category labels are omitted. Search does not limit what is
+  sent. Your list stays editable; pressing Finalize again sends an updated list.
+  Marking or unmarking daily work automatically sends a fresh summary after progress
+  saves, including changes made from other tabs. Failed delivery keeps saved progress
+  and shows guidance; use **Finalize tasks** to resend after checking your bot chat.
+  Long lists arrive as multiple messages. Delivery failures leave picks intact;
+  if delivery is uncertain, check the bot chat before retrying to avoid duplicates.
 - Complete tasks from expanded details to move them out of the **Active** tab
   into **Archive**. Archive keeps details and subtasks readable; **Restore** is
   its only task action. Restore before editing, moving, or deleting a task.
@@ -48,6 +72,9 @@ Migration `0006_subtask_completion.sql` converts existing subtask text to object
 with `completed: false`, preserving descriptions, order, and parent completion.
 It runs automatically on backend restart. API subtasks are now objects such as
 `{ "description": "Build UI", "completed": false }` rather than plain strings.
+Migration `0007_daily_tasks.sql` adds persistent daily picks on backend restart.
+Selected steps gain stable optional string IDs; edits and reordering keep daily
+picks linked to the same step, and deleting a step removes its pick.
 
 ## Local development
 
@@ -116,7 +143,14 @@ Telegram content safe-area insets.
 5. Open the bot's private chat and tap its menu button. No bot polling process
    or webhook is needed for this launch flow. Keep PostgreSQL, backend, Vite,
    and the tunnel running. A new quick tunnel URL requires updating both
-   BotFather and `DEV_ALLOWED_HOST`.
+    BotFather and `DEV_ALLOWED_HOST`.
+
+To receive finalized daily lists, first press **Start** or send `/start` in that
+bot's private chat and ensure the bot is unblocked. The backend sends messages
+with the same `TELEGRAM_BOT_TOKEN` used for Mini App authorization; no additional
+bot service or chat-ID configuration is required. The backend runs its morning
+reminder worker and Telegram callback polling automatically. Keep this bot's
+webhook disabled and avoid a second poller using the same token.
 
 The app sends `Authorization: tma <raw Telegram.WebApp.initData>` on every API
 request. The backend verifies the HMAC signature and freshness, registers the
