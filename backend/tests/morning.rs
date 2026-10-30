@@ -227,7 +227,8 @@ async fn no_and_expired_offers_never_add_work_and_old_backlogs_do_not_prompt() {
         Decision::Unavailable
     );
     store.sweep().await.unwrap();
-    let state: String = sqlx::query_scalar("SELECT state FROM morning_offers")
+    let state: String = sqlx::query_scalar("SELECT state FROM morning_offers WHERE id=$1")
+        .bind(offer)
         .fetch_one(&db.pool)
         .await
         .unwrap();
@@ -238,7 +239,9 @@ async fn no_and_expired_offers_never_add_work_and_old_backlogs_do_not_prompt() {
         .await
         .unwrap();
     store.sweep().await.unwrap();
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+    // Today's independent backlog reminder may exist, but old carryover must
+    // never create another carryover item or restore an expired selection.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_items")
         .fetch_one(&db.pool)
         .await
         .unwrap();
@@ -552,6 +555,288 @@ async fn schedule(db: &TestDb, description: &str) -> i64 {
         .unwrap()
         .unwrap()
         .id
+}
+
+#[tokio::test]
+async fn remind_orders_all_ordinary_backlog_by_urgency_and_excludes_daily_and_other_sources() {
+    use backend::dao::{PgCategoryDao, PgTaskDao, PgUserDao};
+    let db = TestDb::new().await;
+    let category = db.categories().create("Work <&>").await.unwrap();
+    for (name, urgency) in [
+        ("Later", TaskUrgency::Someday),
+        ("Next", TaskUrgency::Upcoming),
+        ("Urgent <&>", TaskUrgency::Soon),
+        ("Urgent second", TaskUrgency::Soon),
+    ] {
+        let parent = db.tasks().create(category.id, name, urgency).await.unwrap();
+        db.tasks()
+            .replace_subtasks(parent.id, &[Subtask::new("Never include backlog subtasks")])
+            .await
+            .unwrap();
+    }
+    let picked = task(&db, "Selected parent").await;
+    db.tasks()
+        .replace_subtasks(picked, &[Subtask::new("One"), Subtask::new("Two")])
+        .await
+        .unwrap();
+    daily(&db).select(picked, Some(0), "UTC").await.unwrap();
+    let completed = task(&db, "Archived").await;
+    db.tasks().set_completed(completed, true).await.unwrap();
+    let expired = task(&db, "Expired daily pick is backlog").await;
+    daily(&db).select(expired, None, "UTC").await.unwrap();
+    sqlx::query("UPDATE daily_tasks SET expires_at=statement_timestamp()-interval '1 second' WHERE task_id=$1")
+        .bind(expired).execute(&db.pool).await.unwrap();
+    schedule(&db, "Never include recurring").await;
+    sqlx::query("INSERT INTO reminder_tasks(user_id,description,due_at,timezone) VALUES ($1,'Never include reminder',statement_timestamp(),'UTC')")
+        .bind(db.user.id).execute(&db.pool).await.unwrap();
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(TELEGRAM_ID + 1)
+        .await
+        .unwrap();
+    let other_category = PgCategoryDao::new(db.pool.clone(), other.id)
+        .create("Secret")
+        .await
+        .unwrap();
+    PgTaskDao::new(db.pool.clone(), other.id)
+        .create(other_category.id, "Other user", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM daily_tasks")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let bot = Arc::new(FakeBot::default());
+    bot.updates.lock().unwrap().extend([
+        command(1, TELEGRAM_ID, Some(TELEGRAM_ID), "/remind"),
+        command(2, TELEGRAM_ID, None, "/remind"),
+        command(3, TELEGRAM_ID, Some(other.telegram_id), "/remind"),
+        command(4, TELEGRAM_ID, Some(TELEGRAM_ID), "/remind@bot"),
+        command(5, TELEGRAM_ID + 2, Some(TELEGRAM_ID + 2), "/remind"),
+    ]);
+    MorningWorker::new(db.pool.clone(), bot.clone())
+        .poll()
+        .await
+        .unwrap();
+    let sent = bot.messages.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    let text = sent[0].1.concat();
+    for expected in ["Work &lt;&amp;&gt;", "Expired daily pick is backlog"] {
+        assert!(text.contains(expected));
+    }
+    let positions: Vec<_> = ["Urgent &lt;&amp;&gt;", "Urgent second", "Next", "Later"]
+        .map(|name| text.find(name).unwrap())
+        .into();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    for excluded in [
+        "Selected parent",
+        "Archived",
+        "Never include",
+        "Other user",
+        "Secret",
+    ] {
+        assert!(!text.contains(excluded), "unexpected {excluded}");
+    }
+    assert!(
+        sent[1]
+            .1
+            .concat()
+            .starts_with("No unfinished ordinary tasks")
+    );
+    drop(sent);
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM daily_tasks")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn backlog_follows_yes_or_no_once_and_uses_post_decision_live_tasks() {
+    for yes in [true, false] {
+        let db = TestDb::new().await;
+        let carried = task(&db, "Carry over").await;
+        task(&db, "Other unfinished work").await;
+        daily(&db).select(carried, None, "UTC").await.unwrap();
+        expire(&db).await;
+        let store = MorningStore::new(db.pool.clone());
+        store.sweep().await.unwrap();
+        let offer = due(&db).await;
+        let bot = Arc::new(FakeBot::default());
+        let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+        worker.deliver_due().await.unwrap();
+        assert!(bot.messages.lock().unwrap().is_empty());
+        bot.updates.lock().unwrap().push(BotUpdate {
+            id: 1,
+            message: None,
+            callback: Some(BotCallback {
+                id: "choice".into(),
+                sender: TELEGRAM_ID,
+                private_chat: Some(TELEGRAM_ID),
+                data: format!("morning:{offer}:{}", if yes { "yes" } else { "no" }),
+            }),
+        });
+        worker.poll().await.unwrap();
+        // Callback replay and worker restart must not resend the follow-up.
+        bot.updates.lock().unwrap().push(BotUpdate {
+            id: 2,
+            message: None,
+            callback: Some(BotCallback {
+                id: "again".into(),
+                sender: TELEGRAM_ID,
+                private_chat: Some(TELEGRAM_ID),
+                data: format!("morning:{offer}:no"),
+            }),
+        });
+        MorningWorker::new(db.pool.clone(), bot.clone())
+            .poll()
+            .await
+            .unwrap();
+        let messages = bot.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        let text = messages[0].1.concat();
+        assert!(text.contains("Other unfinished work"));
+        assert_eq!(text.contains("Carry over"), !yes);
+    }
+}
+
+#[tokio::test]
+async fn backlog_without_offer_uses_local_eight_and_retries_durably_with_live_filtering() {
+    let db = TestDb::new().await;
+    let id = task(&db, "Unplanned work").await;
+    // Save timezone history without leaving anything eligible for carryover.
+    sqlx::query("INSERT INTO morning_offers(user_id,timezone,reset_at,due_at,valid_until,state) VALUES ($1,'Asia/Kathmandu','2026-01-01Z','2026-01-01Z','2026-01-02Z','expired')")
+        .bind(db.user.id).execute(&db.pool).await.unwrap();
+    for instant in [
+        "2026-03-29T02:14:59Z",
+        "2026-03-29T02:15:00Z",
+        "2026-03-29T03:00:00Z",
+    ] {
+        sqlx::query("SELECT prepare_backlog_morning_offers($1::text::timestamptz)")
+            .bind(instant)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM morning_offers WHERE state='pending'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, if instant.ends_with("14:59Z") { 0 } else { 1 });
+    }
+    let valid_schedule: bool = sqlx::query_scalar("SELECT timezone='Asia/Kathmandu' AND due_at='2026-03-29T02:15Z' AND valid_until='2026-03-29T20:15Z' FROM morning_offers WHERE state='pending'")
+        .fetch_one(&db.pool).await.unwrap();
+    assert!(valid_schedule);
+    sqlx::query("DELETE FROM morning_offers WHERE state='expired'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let offer = due(&db).await;
+    let bot = Arc::new(FakeBot::default());
+    *bot.fail.lock().unwrap() = true;
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    assert!(worker.deliver_due().await.is_err());
+    assert!(bot.offers.lock().unwrap().is_empty());
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    worker.deliver_due().await.unwrap();
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    *bot.fail.lock().unwrap() = false;
+    // Work added to today while delivery failed must disappear on retry.
+    daily(&db).select(id, None, "Asia/Kathmandu").await.unwrap();
+    sqlx::query(
+        "UPDATE morning_offers SET backlog_next_attempt_at=statement_timestamp() WHERE id=$1",
+    )
+    .bind(offer)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    MorningWorker::new(db.pool.clone(), bot.clone())
+        .deliver_due()
+        .await
+        .unwrap();
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    let sent: bool = sqlx::query_scalar("SELECT backlog_sent FROM morning_offers WHERE id=$1")
+        .bind(offer)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(sent);
+}
+
+#[tokio::test]
+async fn multiple_due_timezone_groups_wait_for_all_choices_and_share_one_backlog() {
+    let db = TestDb::new().await;
+    task(&db, "Unplanned").await;
+    let store = MorningStore::new(db.pool.clone());
+    let mut offers = Vec::new();
+    for zone in ["UTC", "Etc/UTC"] {
+        let id: i64 = sqlx::query_scalar("INSERT INTO morning_offers(user_id,timezone,reset_at,due_at,valid_until) VALUES ($1,$2,statement_timestamp()-interval '8 hours',statement_timestamp()-interval '1 minute',statement_timestamp()+interval '1 hour') RETURNING id")
+            .bind(db.user.id).bind(zone).fetch_one(&db.pool).await.unwrap();
+        offers.push(id);
+    }
+    assert_eq!(
+        store.decide(offers[0], TELEGRAM_ID, false).await.unwrap(),
+        Decision::Declined
+    );
+    assert!(store.claim_backlog().await.unwrap().is_none());
+    assert_eq!(
+        store.decide(offers[1], TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(0)
+    );
+    let claimed = store.claim_backlog().await.unwrap().unwrap();
+    assert_eq!(claimed.1, db.user.id);
+    assert_eq!(claimed.2, TELEGRAM_ID);
+    assert!(store.claim_backlog().await.unwrap().is_none());
+    store.backlog_sent(claimed.0).await.unwrap();
+    assert!(store.claim_backlog().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn backlog_morning_defaults_to_utc_and_uses_dst_calendar_dates_without_backfill() {
+    let db = TestDb::new().await;
+    task(&db, "Plan").await;
+    sqlx::query("SELECT prepare_backlog_morning_offers('2026-03-08T07:59:59Z')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("SELECT prepare_backlog_morning_offers('2026-03-08T08:00:00Z')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let zone: String = sqlx::query_scalar("SELECT timezone FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(zone, "UTC");
+    sqlx::query("UPDATE morning_offers SET timezone='America/New_York', state='expired'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    // Fall-back day: local 08:00 is 13:00 UTC, not yesterday's UTC offset.
+    sqlx::query("SELECT prepare_backlog_morning_offers('2026-11-01T12:59:59Z')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    sqlx::query("SELECT prepare_backlog_morning_offers('2026-11-01T13:00:00Z')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let valid: bool = sqlx::query_scalar("SELECT timezone='America/New_York' AND due_at='2026-11-01T13:00Z' AND valid_until='2026-11-02T07:00Z' FROM morning_offers WHERE state='pending'").fetch_one(&db.pool).await.unwrap();
+    assert!(valid);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2); // No groups for the months of downtime.
 }
 
 #[tokio::test]

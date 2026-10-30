@@ -41,7 +41,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/telegram.rs` | Outbound Telegram Bot API adapter, bounded requests, sanitized delivery errors. |
 | `src/telegram/morning.rs` | Morning-offer buttons, command-menu registration, message/callback polling and acknowledgements. |
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
-| `src/bot_commands.rs` | Private-chat `/today`, `/start`, and `/help` commands using user-scoped application services. |
+| `src/bot_commands.rs` | Private-chat `/today`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
+| `src/dao/backlog.rs`, `src/service/backlog.rs` | Owned, urgency-ordered unfinished ordinary work outside today's picks. |
 | `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
 | `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
 | `src/dao/reminder.rs`, `src/service/reminder.rs`, `src/api/reminder.rs` | One-time reminders, exact date/time validation, owned CRUD, completion, and daily removal. |
@@ -212,7 +213,15 @@ not block the bot. No additional token or chat-ID environment variable is needed
   scheduled occurrences, using the same category hierarchy, completion flags,
   escaping, and message splitting as Mini App finalization. Empty lists get a
   short reply explaining how to add work. It does not select or complete tasks.
-- `/start` and `/help` explain `/today` and direct users to the Mini App for edits.
+- `/remind` sends unfinished ordinary tasks outside Tasks of the day, ordered
+  Soon → Upcoming → Someday, then category ID and task ID within each urgency.
+  Icon-marked urgency headings contain indented category headings with task names
+  one level deeper, matching daily-summary nesting. Categories group by identity;
+  no subtasks are shown. Any unexpired pick for a task,
+  including an individual subtask, excludes that entire task. Expired picks do
+  not exclude it. Completed, scheduled, and reminder tasks never appear. An empty
+  backlog gets a short reply. This command changes no picks or progress.
+- `/start` and `/help` explain `/today` and `/remind` and direct users to the Mini App for edits.
 - The elected worker registers these commands with Telegram's `setMyCommands`
   using `all_private_chats` scope at startup. Registration failure is logged
   without stopping typed commands; restarting retries menu setup.
@@ -221,8 +230,30 @@ not block the bot. No additional token or chat-ID environment variable is needed
   mismatched identities, bot senders, non-text/edited messages, and unrelated text
   are ignored. Bare commands are supported; addressed `@bot` forms are ignored.
 - Commands reuse `DailyService::current_messages` and the owned daily DAO.
+  `/remind` reuses `BacklogService::current_messages` and the owned backlog DAO.
   Their update offset advances even on delivery failure to avoid blocking later
   callbacks or replaying partially sent summaries. Send `/today` again to retry.
+
+### Morning backlog reminders
+
+Migration `0013_backlog_reminders.sql` adds durable follow-up delivery state to
+morning offers. After Yes or No commits, the bot sends the live `/remind` backlog.
+Unanswered offers wait for a decision; invalid, expired, and repeated callbacks
+do not create reminders. Empty/informational-only offers finish setup without
+buttons and immediately enable the follow-up. Empty automatic backlogs send no
+message. Failed delivery retries after a five-minute lease until the offer expires;
+each attempt resolves current tasks and picks again. Callback offsets advance
+before follow-up delivery, so delivery failure cannot replay acceptance.
+Multiple due timezone groups wait until all pending decisions finish and share
+one follow-up per local morning date.
+
+Users with unfinished ordinary work also get an 08:00 morning group when there
+is no existing current group. Timezone comes from their latest-expiring saved
+daily pick, then latest morning offer, then latest scheduled/reminder task, with
+UTC fallback if none exists. Local calendar arithmetic preserves 08:00 and the
+following 02:00 expiry through DST. Restart catches up the current valid morning
+only; no missed-day backlog is sent. Delivery state prevents routine resends after
+success, while ambiguous network failure can still duplicate a message.
 
 ### Scheduled tasks
 

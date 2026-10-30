@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Unfinished ordinary work absent from today's picks, ordered by urgency.
+pub struct BacklogTask {
+    pub description: String,
+    pub category_id: i64,
+    pub category: String,
+    pub urgency: TaskUrgency,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReminderTaskInput {

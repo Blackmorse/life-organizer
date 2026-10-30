@@ -1,7 +1,7 @@
-//! Private-chat commands reuse the same user-scoped daily list as the Mini App.
+//! Private-chat commands resolve live, user-scoped daily work and backlog.
 use crate::{
-    dao::{PgDailyDao, PgUserDao},
-    service::{DailyService, MessageSender, ServiceError},
+    dao::{PgBacklogDao, PgDailyDao, PgUserDao},
+    service::{BacklogService, DailyService, MessageSender, ServiceError},
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -40,8 +40,18 @@ impl BotCommands {
                     messages
                 }
             }
+            Some("/remind") => {
+                let user = PgUserDao::new(self.pool.clone()).get_or_create(message.sender).await?;
+                let messages = BacklogService::new(Arc::new(PgBacklogDao::new(self.pool.clone(), user.id)))
+                    .current_messages().await?;
+                if messages.is_empty() {
+                    vec!["No unfinished ordinary tasks outside Tasks of the day. Manage your plan in the Mini App.".into()]
+                } else {
+                    messages
+                }
+            }
             Some("/start" | "/help") => vec![
-                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Manage tasks and progress in the Mini App.".into(),
+                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Manage tasks and progress in the Mini App.".into(),
             ],
             _ => return Ok(()),
         };

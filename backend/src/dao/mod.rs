@@ -1,4 +1,6 @@
+mod backlog;
 mod category;
+pub use backlog::{BacklogDao, PgBacklogDao};
 mod daily;
 mod reminder;
 pub use reminder::{PgReminderDao, ReminderDao};

@@ -36,6 +36,9 @@ impl MorningStore {
         sqlx::query("SELECT prepare_reminder_morning_offers(statement_timestamp())")
             .execute(&self.pool)
             .await?;
+        sqlx::query("SELECT prepare_backlog_morning_offers(statement_timestamp())")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("UPDATE morning_offers SET state = 'expired' WHERE state IN ('pending', 'sent') AND valid_until <= statement_timestamp()")
             .execute(&self.pool).await?;
         Ok(())
@@ -134,6 +137,50 @@ impl MorningStore {
         Ok(())
     }
 
+    /// No buttons were sent: setup is complete without requiring a decision.
+    pub async fn ready_without_choice(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE morning_offers SET state='sent', backlog_ready=true WHERE id=$1 AND state IN ('pending', 'sent')")
+            .bind(id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn claim_backlog(&self) -> Result<Option<(i64, i64, i64)>, sqlx::Error> {
+        sqlx::query_as(
+            "UPDATE morning_offers o SET backlog_next_attempt_at=statement_timestamp() + interval '5 minutes'
+             FROM users u WHERE o.id=(SELECT candidate.id FROM morning_offers candidate
+                 WHERE candidate.backlog_ready AND NOT candidate.backlog_sent
+                     AND candidate.due_at <= statement_timestamp() AND candidate.valid_until > statement_timestamp()
+                     AND candidate.backlog_next_attempt_at <= statement_timestamp()
+                     AND NOT EXISTS (SELECT 1 FROM morning_offers leased
+                         WHERE leased.user_id=candidate.user_id AND leased.backlog_ready
+                             AND NOT leased.backlog_sent AND leased.valid_until > statement_timestamp()
+                             AND leased.backlog_next_attempt_at > statement_timestamp())
+                     AND NOT EXISTS (SELECT 1 FROM morning_offers waiting
+                         WHERE waiting.user_id=candidate.user_id AND waiting.state IN ('pending','sent')
+                             AND NOT waiting.backlog_ready AND waiting.due_at <= statement_timestamp()
+                             AND waiting.valid_until > statement_timestamp())
+                     AND NOT EXISTS (SELECT 1 FROM morning_offers delivered
+                         WHERE delivered.user_id=candidate.user_id AND delivered.backlog_sent
+                             AND (delivered.due_at AT TIME ZONE delivered.timezone)::date
+                                 = (candidate.due_at AT TIME ZONE candidate.timezone)::date)
+                 ORDER BY candidate.due_at, candidate.id FOR UPDATE SKIP LOCKED LIMIT 1)
+                 AND u.id=o.user_id RETURNING o.id, u.id, u.telegram_id",
+        ).fetch_optional(&self.pool).await
+    }
+
+    pub async fn backlog_sent(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE morning_offers o SET backlog_sent=true FROM morning_offers delivered
+            WHERE delivered.id=$1 AND o.user_id=delivered.user_id
+                AND (o.due_at AT TIME ZONE o.timezone)::date
+                    = (delivered.due_at AT TIME ZONE delivered.timezone)::date",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn decide(
         &self,
         id: i64,
@@ -192,7 +239,7 @@ impl MorningStore {
             .await?
             .rows_affected();
         }
-        sqlx::query("UPDATE morning_offers SET state = $2 WHERE id = $1")
+        sqlx::query("UPDATE morning_offers SET state = $2, backlog_ready = true WHERE id = $1")
             .bind(id)
             .bind(if yes { "accepted" } else { "declined" })
             .execute(&mut *tx)

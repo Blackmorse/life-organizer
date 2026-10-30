@@ -1,4 +1,6 @@
+mod backlog;
 mod category;
+pub use backlog::BacklogService;
 mod daily;
 mod reminder;
 pub use reminder::ReminderService;

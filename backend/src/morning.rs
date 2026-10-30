@@ -2,8 +2,11 @@
 //! their own boundaries; callbacks never trust a client-supplied owner.
 use crate::{
     bot_commands::{BotCommands, BotMessage},
-    dao::morning::{Decision, MorningStore},
-    service::{MessageSender, NotificationError, ServiceError, summary_messages},
+    dao::{
+        PgBacklogDao,
+        morning::{Decision, MorningStore},
+    },
+    service::{BacklogService, MessageSender, NotificationError, ServiceError, summary_messages},
 };
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -40,6 +43,7 @@ pub struct MorningWorker {
     store: MorningStore,
     commands: BotCommands,
     bot: Arc<dyn MorningBot>,
+    backlog_delivery: tokio::sync::Mutex<()>,
 }
 
 impl MorningWorker {
@@ -49,6 +53,7 @@ impl MorningWorker {
             store: MorningStore::new(pool.clone()),
             commands: BotCommands::new(pool),
             bot,
+            backlog_delivery: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -79,7 +84,32 @@ impl MorningWorker {
             } else if !messages.is_empty() {
                 self.bot.send(offer.recipient, &messages).await?;
             }
-            self.store.sent(offer.id).await?;
+            if offer.items.is_empty() {
+                self.store.ready_without_choice(offer.id).await?;
+            } else {
+                self.store.sent(offer.id).await?;
+            }
+        }
+        self.deliver_backlogs().await?;
+        Ok(())
+    }
+
+    async fn deliver_backlogs(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Polling and timer delivery run concurrently in the elected worker.
+        // Serialize follow-ups so multiple timezone groups cannot race a send.
+        let _delivery = self.backlog_delivery.lock().await;
+        for _ in 0..20 {
+            let Some((id, user_id, recipient)) = self.store.claim_backlog().await? else {
+                break;
+            };
+            let messages =
+                BacklogService::new(Arc::new(PgBacklogDao::new(self.pool.clone(), user_id)))
+                    .current_messages()
+                    .await?;
+            if !messages.is_empty() {
+                self.bot.send(recipient, &messages).await?;
+            }
+            self.store.backlog_sent(id).await?;
         }
         Ok(())
     }
@@ -114,14 +144,17 @@ impl MorningWorker {
                         .bot
                         .send(
                             message.sender,
-                            &["Could not load today's tasks. Please try /today again.".into()],
+                            &["Could not load tasks. Please retry your command.".into()],
                         )
                         .await;
                 }
-                eprintln!("Bot command failed; the user can retry with /today.");
+                eprintln!("Bot command failed; the user can retry the command.");
             }
             self.store.advance(update.id + 1).await?;
         }
+        // Decisions are committed and offsets advanced before follow-up delivery.
+        // A failed reminder retries via its lease rather than replaying a callback.
+        self.deliver_backlogs().await?;
         Ok(())
     }
 }

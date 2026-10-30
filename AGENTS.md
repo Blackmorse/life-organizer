@@ -89,6 +89,15 @@ and polls messages alongside callbacks. Commands reuse user-scoped daily logic.
 An advisory lock selects one worker. Subcategories and implementation
 plans are not implemented yet.
 
+After the 08:00 setup, the bot reminds users of unfinished ordinary tasks outside
+Tasks of the day, ordered Soon → Upcoming → Someday. A Yes/No offer waits for the
+user's decision; mornings without an actionable offer send the reminder directly.
+Any active pick for a task (including one subtask) excludes that task. Scheduled
+and reminder tasks never appear. `/remind` sends this live backlog on demand;
+`/start` and `/help` explain both `/today` and `/remind`. Morning backlog delivery
+uses saved timezone history, falling back to UTC when none exists, and persists
+delivery/retry state across restarts.
+
 Scheduled tasks live in separate user-owned `scheduled_tasks` and
 `scheduled_occurrences` tables. The Scheduled tasks tab manages description,
 optional ordered subtasks, and a required weekly schedule (one or more

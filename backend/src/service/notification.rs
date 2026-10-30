@@ -1,6 +1,45 @@
 use crate::domain::{DailyTaskSource, DailyTaskSummary};
 use async_trait::async_trait;
 
+pub(super) fn backlog_messages(items: &[crate::domain::BacklogTask]) -> Vec<String> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let mut html = HtmlMessages::default();
+    html.append("Still on your plan — outside Tasks of the day", true);
+    html.append("\n\n", false);
+    let mut previous = None;
+    let mut previous_category = None;
+    for item in items {
+        if previous != Some(item.urgency) {
+            if previous.is_some() {
+                html.append("\n", false);
+            }
+            let heading = match item.urgency {
+                crate::domain::TaskUrgency::Soon => "🔥 Soon — within days",
+                crate::domain::TaskUrgency::Upcoming => "📅 Upcoming — within weeks",
+                crate::domain::TaskUrgency::Someday => "🌱 Someday",
+            };
+            html.append(heading, true);
+            html.append("\n", false);
+            previous = Some(item.urgency);
+            previous_category = None;
+        }
+        if previous_category != Some(item.category_id) {
+            if previous_category.is_some() {
+                html.append("\n", false);
+            }
+            html.append(&indented(&format!("📁 {}", item.category), 1), true);
+            html.append("\n", false);
+            previous_category = Some(item.category_id);
+        }
+        html.append(&indented(&format!("🔹 {}", item.description), 2), true);
+        html.append("\n", false);
+    }
+    html.flush();
+    html.messages
+}
+
 /// Delivery boundary for independently valid Telegram HTML messages.
 /// Application logic does not depend on an HTTP client.
 #[async_trait]
@@ -141,6 +180,43 @@ impl HtmlMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backlog_nests_categories_under_urgency_and_tasks_under_categories() {
+        use crate::domain::{BacklogTask, TaskUrgency};
+        let item = |category_id, category: &str, description: &str, urgency| BacklogTask {
+            category_id,
+            category: category.into(),
+            description: description.into(),
+            urgency,
+        };
+        let messages = backlog_messages(&[
+            item(1, "Work <&>", "First", TaskUrgency::Soon),
+            item(1, "Work <&>", "Second\nline", TaskUrgency::Soon),
+            item(2, "Work <&>", "Separate category", TaskUrgency::Soon),
+            item(1, "Work <&>", "Later", TaskUrgency::Upcoming),
+            item(1, "Work <&>", "Eventually", TaskUrgency::Someday),
+        ]);
+        let indent = "\u{a0}".repeat(4);
+        assert_eq!(
+            messages,
+            vec![format!(
+                "<b>Still on your plan — outside Tasks of the day</b>\n\n\
+             <b>🔥 Soon — within days</b>\n\
+             <b>{indent}📁 Work &lt;&amp;&gt;</b>\n\
+             <b>{indent}{indent}🔹 First</b>\n\
+             <b>{indent}{indent}🔹 Second\n{indent}{indent}  line</b>\n\n\
+             <b>{indent}📁 Work &lt;&amp;&gt;</b>\n\
+             <b>{indent}{indent}🔹 Separate category</b>\n\n\
+             <b>📅 Upcoming — within weeks</b>\n\
+             <b>{indent}📁 Work &lt;&amp;&gt;</b>\n\
+             <b>{indent}{indent}🔹 Later</b>\n\n\
+             <b>🌱 Someday</b>\n\
+             <b>{indent}📁 Work &lt;&amp;&gt;</b>\n\
+             <b>{indent}{indent}🔹 Eventually</b>\n"
+            )]
+        );
+    }
 
     #[test]
     fn long_unicode_lists_are_complete_and_within_telegram_limits() {
