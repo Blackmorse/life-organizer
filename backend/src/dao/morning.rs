@@ -1,4 +1,4 @@
-use crate::domain::DailyTaskSummary;
+use crate::domain::{DailyTaskSource, DailyTaskSummary};
 use sqlx::PgPool;
 
 type MorningSummaryRow = (i64, String, String, Option<String>, i64, Option<i64>);
@@ -11,6 +11,7 @@ pub struct MorningOffer {
     pub id: i64,
     pub recipient: i64,
     pub items: Vec<DailyTaskSummary>,
+    pub tomorrow: Vec<DailyTaskSummary>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -30,6 +31,9 @@ impl MorningStore {
             .execute(&self.pool)
             .await?;
         sqlx::query("SELECT prepare_scheduled_morning_offers(statement_timestamp())")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("SELECT prepare_reminder_morning_offers(statement_timestamp())")
             .execute(&self.pool)
             .await?;
         sqlx::query("UPDATE morning_offers SET state = 'expired' WHERE state IN ('pending', 'sent') AND valid_until <= statement_timestamp()")
@@ -70,10 +74,15 @@ impl MorningStore {
                   AND o.expires_at > statement_timestamp()
               ORDER BY 1, 5")
             .bind(id).fetch_all(&self.pool).await?;
-        let items = rows
+        let mut items: Vec<_> = rows
             .into_iter()
             .map(
                 |(task_id, category, task, subtask, _, category_id)| DailyTaskSummary {
+                    source: if category_id.is_some() {
+                        DailyTaskSource::Ordinary
+                    } else {
+                        DailyTaskSource::Scheduled
+                    },
                     task_id,
                     category_id,
                     category,
@@ -83,10 +92,37 @@ impl MorningStore {
                 },
             )
             .collect();
+        let reminders: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT r.id, r.description || ' — ' || to_char(r.due_at AT TIME ZONE r.timezone, 'YYYY-MM-DD HH24:MI') || ' (' || r.timezone || ')', i.kind
+             FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id
+             JOIN reminder_tasks r ON r.id=i.reminder_id
+             WHERE i.offer_id=$1 AND r.user_id=m.user_id AND NOT r.completed
+                 AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.selected_until IS NULL
+                 AND (i.kind='today' OR (r.due_at AT TIME ZONE r.timezone)::date = (statement_timestamp() AT TIME ZONE r.timezone)::date + 1)
+             ORDER BY r.due_at, r.id")
+            .bind(id).fetch_all(&self.pool).await?;
+        let mut tomorrow = Vec::new();
+        for (task_id, task, kind) in reminders {
+            let item = DailyTaskSummary {
+                source: DailyTaskSource::Reminder,
+                task_id,
+                category_id: None,
+                category: "⏰ Reminders".into(),
+                task,
+                subtask: None,
+                completed: false,
+            };
+            if kind == "today" {
+                items.push(item);
+            } else {
+                tomorrow.push(item);
+            }
+        }
         Ok(Some(MorningOffer {
             id,
             recipient,
             items,
+            tomorrow,
         }))
     }
 
@@ -137,6 +173,18 @@ impl MorningStore {
                      AND s.id = o.scheduled_task_id AND s.user_id = $2
                      AND NOT o.selected AND NOT o.hidden AND NOT o.completed
                      AND o.expires_at > statement_timestamp()",
+            )
+            .bind(id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            count += sqlx::query(
+                "UPDATE reminder_tasks r SET selected_until=m.valid_until
+                 FROM morning_offer_reminder_items i, morning_offers m
+                 WHERE i.offer_id=$1 AND m.id=i.offer_id AND i.kind='today'
+                     AND r.id=i.reminder_id AND r.user_id=$2 AND NOT r.completed
+                     AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.selected_until IS NULL",
             )
             .bind(id)
             .bind(user_id)

@@ -3,8 +3,10 @@ import { Alert, Box, Button, Checkbox, IconButton, List, ListItem, Stack, Toolti
 import TodayOutlinedIcon from '@mui/icons-material/TodayOutlined'
 import CloseIcon from '@mui/icons-material/Close'
 import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
-import type { Category, DailyTask, Subtask, Task, ScheduledOccurrence } from '../types'
+import type { Category, DailyTask, Subtask, Task, ScheduledOccurrence, ReminderTask } from '../types'
 import { ScheduledDaily } from './ScheduledDaily'
+import { ReminderDaily } from './ReminderTasks'
+import { reminderDate } from '../reminders'
 
 import { DailyContext } from './DailyContext'
 
@@ -22,7 +24,10 @@ export function DailyPickButton({ taskId, step, steps = [], index, label, disabl
   </IconButton></span></Tooltip>
 }
 
-export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onSetCompleted, onReplaceSubtasks, scheduled, onCompleteScheduled, onSubtasksScheduled, onDismissScheduled }: {
+export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onSetCompleted, onReplaceSubtasks, scheduled, onCompleteScheduled, onSubtasksScheduled, onDismissScheduled, reminders, onCompleteReminder, onDismissReminder }: {
+  reminders: ReminderTask[]
+  onCompleteReminder: (id: number, completed: boolean) => Promise<boolean>
+  onDismissReminder: (id: number) => Promise<boolean>
   scheduled: ScheduledOccurrence[]
   onCompleteScheduled: (id: number, completed: boolean) => Promise<boolean>
   onSubtasksScheduled: (id: number, steps: Subtask[]) => Promise<boolean>
@@ -33,7 +38,9 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
   onReplaceSubtasks: (id: number, steps: Subtask[]) => Promise<boolean>
   onFinalize: () => Promise<boolean>
 }) {
-  const [sent, setSent] = useState<{ picks: DailyTask[], tasks: Task[], scheduled: ScheduledOccurrence[] } | null>(null)
+  const [sent, setSent] = useState<{ picks: DailyTask[], tasks: Task[], scheduled: ScheduledOccurrence[], reminders: ReminderTask[] } | null>(null)
+  const currentReminders = reminders.filter((item) => item.expires_at !== null)
+  const visibleReminders = currentReminders.filter((item) => `${item.description} ${reminderDate(item)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const currentScheduled = scheduled
   const visibleScheduled = currentScheduled.filter((item) => [item.description, ...item.subtasks.map((step) => step.description)].some((text) => text.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))
   const rows = picks.flatMap((pick) => {
@@ -69,14 +76,15 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
   return <Box component="section" aria-label="Daily checklist" sx={{ mt: 2 }}>
     <Typography variant="body2" color="text.secondary">Clears at 2:00 AM ({Intl.DateTimeFormat().resolvedOptions().timeZone}). Tasks and progress stay saved.</Typography>
     <Stack spacing={1} sx={{ my: 2, alignItems: 'flex-start' }}>
-      <Button variant="contained" startIcon={<SendOutlinedIcon />} disabled={disabled || (rows.length === 0 && currentScheduled.length === 0)} onClick={async () => {
+      <Button variant="contained" startIcon={<SendOutlinedIcon />} disabled={disabled || (rows.length === 0 && currentScheduled.length === 0 && currentReminders.length === 0)} onClick={async () => {
         setSent(null)
-        if (await onFinalize()) setSent({ picks, tasks, scheduled })
+        if (await onFinalize()) setSent({ picks, tasks, scheduled, reminders })
       }}>Finalize tasks</Button>
       <Typography variant="caption" color="text.secondary">Sends all current daily picks to your Telegram bot chat. Completion changes automatically send an updated list.</Typography>
     </Stack>
-    {sent?.picks === picks && sent.tasks === tasks && sent.scheduled === scheduled && <Alert severity="success" role="status">Today's tasks sent to your Telegram bot chat.</Alert>}
+    {sent?.picks === picks && sent.tasks === tasks && sent.scheduled === scheduled && sent.reminders === reminders && <Alert severity="success" role="status">Today's tasks sent to your Telegram bot chat.</Alert>}
     <List>
+      {visibleReminders.map((task) => <ReminderDaily key={`reminder-${task.id}`} task={task} disabled={disabled} onComplete={onCompleteReminder} onDismiss={onDismissReminder} />)}
       {visibleScheduled.map((item) => <ScheduledDaily key={`scheduled-${item.id}`} item={item} disabled={disabled} onComplete={onCompleteScheduled} onSubtasks={onSubtasksScheduled} onDismiss={onDismissScheduled} />)}
       {[...groups.entries()].map(([taskId, group]) => {
         const { task, category } = group[0]
@@ -93,6 +101,6 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
         </ListItem>
       })}
     </List>
-    {!visibleRows.length && !visibleScheduled.length && <Typography color="text.secondary">{query ? 'No matches' : 'No tasks of the day yet. Use the calendar buttons beside tasks or subtasks to add them.'}</Typography>}
+    {!visibleRows.length && !visibleScheduled.length && !visibleReminders.length && <Typography color="text.secondary">{query ? 'No matches' : 'No tasks of the day yet. Use the calendar buttons beside tasks or subtasks to add them.'}</Typography>}
   </Box>
 }

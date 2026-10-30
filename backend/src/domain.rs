@@ -2,6 +2,24 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReminderTaskInput {
+    pub description: String,
+    /// Exact instant in Unix milliseconds; timezone determines morning calendar dates.
+    pub due_at: i64,
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReminderTask {
+    pub id: i64,
+    #[serde(flatten)]
+    pub details: ReminderTaskInput,
+    pub completed: bool,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduledTaskInput {
     pub description: String,
     pub weekdays: Vec<i16>,
@@ -41,11 +59,20 @@ pub struct DailyTask {
     pub expires_at: i64,
 }
 
+/// Identity namespace and presentation section for a daily summary row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DailyTaskSource {
+    Ordinary,
+    Scheduled,
+    Reminder,
+}
+
 /// A current, user-owned daily pick resolved in a single database snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyTaskSummary {
+    pub source: DailyTaskSource,
     pub task_id: i64,
-    /// None for category-free scheduled occurrences.
+    /// None for category-free scheduled occurrences and reminders.
     pub category_id: Option<i64>,
     pub category: String,
     pub task: String,

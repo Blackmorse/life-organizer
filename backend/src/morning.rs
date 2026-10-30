@@ -60,13 +60,24 @@ impl MorningWorker {
             let Some(offer) = self.store.claim().await? else {
                 break;
             };
+            let mut messages = if offer.tomorrow.is_empty() {
+                Vec::new()
+            } else {
+                summary_messages(
+                    &offer.tomorrow,
+                    "Note: tomorrow there are scheduled one-time tasks",
+                    "These reminders are for tomorrow; they are not added to today's list.",
+                )
+            };
             if !offer.items.is_empty() {
-                let messages = summary_messages(
+                messages.extend(summary_messages(
                     &offer.items,
-                    "Suggested tasks for today: scheduled work and unfinished daily picks",
+                    "Suggested tasks for today: scheduled work, reminders and unfinished daily picks",
                     "Add these tasks to Tasks of the day?",
-                );
+                ));
                 self.bot.offer(offer.recipient, offer.id, &messages).await?;
+            } else if !messages.is_empty() {
+                self.bot.send(offer.recipient, &messages).await?;
             }
             self.store.sent(offer.id).await?;
         }

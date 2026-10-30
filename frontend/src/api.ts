@@ -1,4 +1,4 @@
-import type { Category, DailyTask, Subtask, Task, TaskInput, ScheduledTask, ScheduledTaskInput, ScheduledOccurrence } from './types'
+import type { Category, DailyTask, Subtask, Task, TaskInput, ScheduledTask, ScheduledTaskInput, ScheduledOccurrence, ReminderTask, ReminderTaskInput } from './types'
 import { getTelegramInitData } from './telegram'
 
 export class AuthorizationError extends Error {}
@@ -42,6 +42,11 @@ async function request<T>(path: string, method = 'GET', body?: unknown, signal?:
 }
 
 export const api = {
+  listReminders: (signal?: AbortSignal) => request<ReminderTask[]>('/reminder-tasks', 'GET', undefined, signal),
+  saveReminder: (input: ReminderTaskInput, id?: number) => request<ReminderTask>(id === undefined ? '/reminder-tasks' : `/reminder-tasks/${id}`, id === undefined ? 'POST' : 'PUT', input),
+  deleteReminder: (id: number) => request<void>(`/reminder-tasks/${id}`, 'DELETE'),
+  completeReminder: (id: number, completed: boolean) => request<ReminderTask>(`/reminder-tasks/${id}/completion`, 'PUT', { completed }),
+  dismissReminder: (id: number) => request<void>(`/reminder-tasks/${id}/daily`, 'DELETE'),
   listScheduledTasks: (signal?: AbortSignal) => request<ScheduledTask[]>('/scheduled-tasks', 'GET', undefined, signal),
   saveScheduledTask: (input: ScheduledTaskInput, id?: number) => request<ScheduledTask>(id === undefined ? '/scheduled-tasks' : `/scheduled-tasks/${id}`, id === undefined ? 'POST' : 'PUT', input),
   deleteScheduledTask: (id: number) => request<void>(`/scheduled-tasks/${id}`, 'DELETE'),

@@ -1,5 +1,7 @@
 mod category;
 mod daily;
+mod reminder;
+pub use reminder::ReminderService;
 mod notification;
 pub use daily::DailyService;
 pub use notification::{MessageSender, NotificationError};

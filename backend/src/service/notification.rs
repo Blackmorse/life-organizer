@@ -1,4 +1,4 @@
-use crate::domain::DailyTaskSummary;
+use crate::domain::{DailyTaskSource, DailyTaskSummary};
 use async_trait::async_trait;
 
 /// Delivery boundary for independently valid Telegram HTML messages.
@@ -30,12 +30,12 @@ pub(crate) fn summary_messages(
     footer: &str,
 ) -> Vec<String> {
     let mut categories = std::collections::BTreeMap::<
-        Option<i64>,
+        (DailyTaskSource, Option<i64>),
         std::collections::BTreeMap<i64, Vec<&DailyTaskSummary>>,
     >::new();
     for item in items {
         categories
-            .entry(item.category_id)
+            .entry((item.source, item.category_id))
             .or_default()
             .entry(item.task_id)
             .or_default()
@@ -44,11 +44,13 @@ pub(crate) fn summary_messages(
     let mut html = HtmlMessages::default();
     html.append(title, true);
     html.append("\n\n", false);
-    for (category_id, groups) in categories {
-        let heading = if category_id.is_some() {
-            format!("📁 {}", groups.values().next().unwrap()[0].category)
-        } else {
-            "🔁 Scheduled".into()
+    for ((source, _), groups) in categories {
+        let heading = match source {
+            DailyTaskSource::Ordinary => {
+                format!("📁 {}", groups.values().next().unwrap()[0].category)
+            }
+            DailyTaskSource::Scheduled => "🔁 Scheduled".into(),
+            DailyTaskSource::Reminder => "⏰ Reminders".into(),
         };
         html.append(&indented(&heading, 0), true);
         html.append("\n", false);
@@ -143,6 +145,7 @@ mod tests {
     #[test]
     fn long_unicode_lists_are_complete_and_within_telegram_limits() {
         let item = DailyTaskSummary {
+            source: DailyTaskSource::Ordinary,
             task_id: 1,
             category_id: Some(1),
             category: "Work <&>".into(),
@@ -186,6 +189,7 @@ mod tests {
     #[test]
     fn groups_selected_steps_by_identity_and_uses_status_emoji() {
         let item = |task_id, task: &str, subtask: Option<&str>, completed| DailyTaskSummary {
+            source: DailyTaskSource::Ordinary,
             task_id,
             category_id: Some(1),
             category: "Work <&>".into(),
@@ -211,13 +215,20 @@ mod tests {
 
     #[test]
     fn category_identity_scheduled_section_and_multiline_indentation_are_preserved() {
-        let item = |task_id, category_id, task: &str, subtask: Option<&str>| DailyTaskSummary {
-            task_id,
-            category_id,
-            category: "Same <&>\ncategory".into(),
-            task: task.into(),
-            subtask: subtask.map(String::from),
-            completed: false,
+        let item = |task_id, category_id: Option<i64>, task: &str, subtask: Option<&str>| {
+            DailyTaskSummary {
+                source: if category_id.is_some() {
+                    DailyTaskSource::Ordinary
+                } else {
+                    DailyTaskSource::Scheduled
+                },
+                task_id,
+                category_id,
+                category: "Same <&>\ncategory".into(),
+                task: task.into(),
+                subtask: subtask.map(String::from),
+                completed: false,
+            }
         };
         let messages = summary_messages(
             &[

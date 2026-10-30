@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, AuthorizationError } from '../api'
-import type { Category, DailyTask, Subtask, Task, TaskInput, ScheduledTask, ScheduledTaskInput, ScheduledOccurrence } from '../types'
+import { normalizeReminders } from '../reminders'
+import type { Category, DailyTask, Subtask, Task, TaskInput, ScheduledTask, ScheduledTaskInput, ScheduledOccurrence, ReminderTask, ReminderTaskInput } from '../types'
 
 export function useWorkspace() {
   const [categories, setCategories] = useState<Category[]>([])
@@ -8,6 +9,7 @@ export function useWorkspace() {
   const [dailyTasks, setDailyTasks] = useState<DailyTask[]>([])
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([])
   const [scheduledDaily, setScheduledDaily] = useState<ScheduledOccurrence[]>([])
+  const [reminders, setReminders] = useState<ReminderTask[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -18,14 +20,15 @@ export function useWorkspace() {
 
   useEffect(() => {
     const controller = new AbortController()
-    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal), api.listScheduledTasks(controller.signal), api.listScheduledDaily(controller.signal)])
-      .then(([nextCategories, nextTasks, nextDailyTasks, nextScheduled, nextScheduledDaily]) => {
+    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal), api.listScheduledTasks(controller.signal), api.listScheduledDaily(controller.signal), api.listReminders(controller.signal)])
+      .then(([nextCategories, nextTasks, nextDailyTasks, nextScheduled, nextScheduledDaily, nextReminders]) => {
         if (controller.signal.aborted) return
         setCategories(nextCategories)
         setTasks(nextTasks)
         setDailyTasks(nextDailyTasks.filter((item) => item.expires_at > Date.now()))
         setScheduledTasks(nextScheduled)
         setScheduledDaily(nextScheduledDaily.filter((item) => item.expires_at > Date.now()))
+        setReminders(normalizeReminders(nextReminders))
         setAuthorizationRequired(false)
       })
       .catch((cause: unknown) => {
@@ -44,8 +47,9 @@ export function useWorkspace() {
     function expire() {
       setDailyTasks((items) => items.filter((item) => item.expires_at > Date.now()))
       setScheduledDaily((items) => items.filter((item) => item.expires_at > Date.now()))
+      setReminders(normalizeReminders)
     }
-    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at))
+    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at), ...reminders.flatMap((item) => item.expires_at !== null ? [item.expires_at] : []))
     const timer = Number.isFinite(nextExpiry) ? window.setTimeout(expire, Math.max(0, nextExpiry - Date.now())) : undefined
     window.addEventListener('focus', expire)
     document.addEventListener('visibilitychange', expire)
@@ -54,7 +58,7 @@ export function useWorkspace() {
       window.removeEventListener('focus', expire)
       document.removeEventListener('visibilitychange', expire)
     }
-  }, [dailyTasks, scheduledDaily])
+  }, [dailyTasks, scheduledDaily, reminders])
 
   useEffect(() => {
     if (loading || authorizationRequired) return
@@ -65,9 +69,10 @@ export function useWorkspace() {
       pending = true
       const version = mutationVersion.current
       try {
-        const items = await api.listScheduledDaily(controller.signal)
+        const [items, nextReminders] = await Promise.all([api.listScheduledDaily(controller.signal), api.listReminders(controller.signal)])
         if (!controller.signal.aborted && !mutationInFlight.current && version === mutationVersion.current) {
           setScheduledDaily(items.filter((item) => item.expires_at > Date.now()))
+          setReminders(normalizeReminders(nextReminders))
         }
       } catch (cause) {
         if (!controller.signal.aborted) {
@@ -141,7 +146,30 @@ export function useWorkspace() {
   }
 
   return {
-    categories, tasks, dailyTasks, scheduledTasks, scheduledDaily, loading, saving, error, authorizationRequired,
+    categories, tasks, dailyTasks, scheduledTasks, scheduledDaily, reminders, loading, saving, error, authorizationRequired,
+    saveReminder: (input: ReminderTaskInput, id?: number) => mutate(async () => {
+      const [task] = normalizeReminders([await api.saveReminder(input, id)])
+      setReminders((items) => id === undefined ? [...items, task] : items.map((item) => item.id === id ? task : item))
+    }),
+    deleteReminder: (id: number) => mutate(async () => {
+      await api.deleteReminder(id)
+      setReminders((items) => items.filter((item) => item.id !== id))
+    }),
+    completeReminder: (id: number, completed: boolean) => mutate(async () => {
+      const [task] = normalizeReminders([await api.completeReminder(id, completed)])
+      const previous = reminders.find((item) => item.id === id)
+      setReminders((items) => items.map((item) => item.id === id ? task : item))
+      if (task.expires_at !== null && task.expires_at > Date.now() && previous?.completed !== completed) {
+        try { await api.finalizeDailyTasks() } catch (cause) {
+          setError(`Progress saved, but the Telegram summary could not be sent. ${errorMessage(cause)} Use Finalize tasks to resend the current list.`)
+          setAuthorizationRequired(cause instanceof AuthorizationError)
+        }
+      }
+    }),
+    dismissReminder: (id: number) => mutate(async () => {
+      await api.dismissReminder(id)
+      setReminders((items) => items.map((item) => item.id === id ? { ...item, expires_at: null } : item))
+    }),
     saveScheduledTask: (input: ScheduledTaskInput, id?: number) => mutate(async () => {
       const task = await api.saveScheduledTask(input, id)
       setScheduledTasks((items) => id === undefined ? [...items, task] : items.map((item) => item.id === id ? task : item))

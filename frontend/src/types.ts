@@ -46,3 +46,14 @@ export interface ScheduledOccurrence {
   completed: boolean
   expires_at: number
 }
+
+export interface ReminderTaskInput {
+  description: string
+  due_at: number
+  timezone: string
+}
+export interface ReminderTask extends ReminderTaskInput {
+  id: number
+  completed: boolean
+  expires_at: number | null
+}

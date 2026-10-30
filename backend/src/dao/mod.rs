@@ -1,5 +1,7 @@
 mod category;
 mod daily;
+mod reminder;
+pub use reminder::{PgReminderDao, ReminderDao};
 pub mod morning;
 mod scheduled;
 mod task;

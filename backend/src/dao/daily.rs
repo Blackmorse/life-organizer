@@ -1,9 +1,18 @@
 use super::DaoError;
-use crate::domain::{DailyTask, DailyTaskSummary, Subtask};
+use crate::domain::{DailyTask, DailyTaskSource, DailyTaskSummary, Subtask};
 use async_trait::async_trait;
 use sqlx::{PgPool, types::Json};
 
-type DailySummaryRow = (i64, String, String, Option<String>, bool, i64, Option<i64>);
+type DailySummaryRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    bool,
+    i64,
+    Option<i64>,
+    bool,
+);
 
 #[async_trait]
 pub trait DailyDao: Send + Sync {
@@ -35,7 +44,7 @@ impl DailyDao for PgDailyDao {
         super::generate_scheduled(&self.pool, Some(self.user_id)).await?;
         let rows: Vec<DailySummaryRow> = sqlx::query_as(
             "SELECT t.id, c.description, t.description, s.step->>'description',
-                t.completed OR COALESCE((s.step->>'completed')::boolean, false), COALESCE(s.position, 0), c.id
+                t.completed OR COALESCE((s.step->>'completed')::boolean, false), COALESCE(s.position, 0), c.id, false
              FROM daily_tasks d
              JOIN tasks t ON t.id = d.task_id
              JOIN categories c ON c.id = t.category_id
@@ -48,10 +57,14 @@ impl DailyDao for PgDailyDao {
                  AND (d.subtask_id = '' OR s.step IS NOT NULL)
              UNION ALL
               SELECT -o.id, '', o.description, s.step->>'description',
-                  o.completed OR COALESCE((s.step->>'completed')::boolean, false), COALESCE(s.position, 0), NULL::bigint
+                   o.completed OR COALESCE((s.step->>'completed')::boolean, false), COALESCE(s.position, 0), NULL::bigint, false
               FROM scheduled_occurrences o JOIN scheduled_tasks st ON st.id=o.scheduled_task_id
               LEFT JOIN LATERAL jsonb_array_elements(o.subtasks) WITH ORDINALITY AS s(step, position) ON true
-              WHERE st.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp()
+               WHERE st.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp()
+             UNION ALL
+               SELECT r.id, '⏰ Reminders', r.description || ' — ' || to_char(r.due_at AT TIME ZONE r.timezone, 'YYYY-MM-DD HH24:MI') || ' (' || r.timezone || ')',
+                   NULL::text, r.completed, 0::bigint, NULL::bigint, true
+               FROM reminder_tasks r WHERE r.user_id=$1 AND r.selected_until > statement_timestamp()
              ORDER BY 1, 6",
         )
         .bind(self.user_id)
@@ -60,13 +73,22 @@ impl DailyDao for PgDailyDao {
         Ok(rows
             .into_iter()
             .map(
-                |(task_id, category, task, subtask, completed, _, category_id)| DailyTaskSummary {
-                    task_id,
-                    category_id,
-                    category,
-                    task,
-                    subtask,
-                    completed,
+                |(task_id, category, task, subtask, completed, _, category_id, reminder)| {
+                    DailyTaskSummary {
+                        source: if reminder {
+                            DailyTaskSource::Reminder
+                        } else if category_id.is_some() {
+                            DailyTaskSource::Ordinary
+                        } else {
+                            DailyTaskSource::Scheduled
+                        },
+                        task_id,
+                        category_id,
+                        category,
+                        task,
+                        subtask,
+                        completed,
+                    }
                 },
             )
             .collect())

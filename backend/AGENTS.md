@@ -44,6 +44,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/bot_commands.rs` | Private-chat `/today`, `/start`, and `/help` commands using user-scoped application services. |
 | `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
 | `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
+| `src/dao/reminder.rs`, `src/service/reminder.rs`, `src/api/reminder.rs` | One-time reminders, exact date/time validation, owned CRUD, completion, and daily removal. |
 | `src/service/notification.rs` | Transport-independent message sender boundary and daily summary formatting. |
 | `src/api/auth.rs` | Authentication middleware, user registration, and per-user service wiring. |
 | `src/db.rs` | Create the PostgreSQL pool and apply migrations; reused by tests. |
@@ -123,6 +124,12 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/me` | Current user `{id, telegram_id}` (`200`). |
+| GET | `/reminder-tasks` | List owned one-time reminders, including completed/past reminders (`200`). |
+| POST | `/reminder-tasks` | Create reminder (`201`). |
+| PUT | `/reminder-tasks/{id}` | Replace reminder description, exact instant, timezone (`200`). |
+| DELETE | `/reminder-tasks/{id}` | Delete reminder and its offer links (`204`). |
+| PUT | `/reminder-tasks/{id}/completion` | Set completion and return reminder (`200`). |
+| DELETE | `/reminder-tasks/{id}/daily` | Remove active daily selection, preserving reminder/progress (`204`). |
 | GET | `/scheduled-tasks` | List owned recurring templates (`200`). |
 | POST | `/scheduled-tasks` | Create a category-free recurring template (`201`). |
 | PUT | `/scheduled-tasks/{id}` | Replace template details/schedule (`200`). |
@@ -271,6 +278,42 @@ still-owned, unexpired, unfinished, unhidden occurrences atomically with ordinar
 picks. No leaves candidates unselected. Scheduled occurrences never carry over;
 future due days get fresh candidates regardless of previous decisions/progress.
 Candidates created after an offer is sent or answered are not added to that offer.
+
+### Reminder tasks
+
+Migration `0012_reminder_tasks.sql` adds directly user-owned `reminder_tasks`
+and durable `morning_offer_reminder_items` links. POST/PUT input:
+`{"description":"Dentist","due_at":1804516200000,"timezone":"Europe/Berlin"}`.
+`due_at` is a required exact instant in Unix milliseconds (1970 through 9998),
+not a naive local datetime. The frontend converts device-local input to an instant;
+timezone is validated against PostgreSQL. No categories, urgency, or subtasks.
+Unknown fields and blank descriptions are rejected. Responses add `id`,
+`completed`, and nullable `expires_at` (Unix milliseconds of daily selection expiry).
+Expired selections are excluded from summaries even when the app is closed.
+Completion takes `{"completed":true}` or false and preserves selection and details.
+Completed reminders remain editable/reopenable in their own list; ordinary-task
+archive rules do not apply. All operations are scoped to authenticated ownership.
+
+`prepare_reminder_morning_offers(instant)` joins the same owner/timezone/reset
+morning groups as existing offers. Reminder calendar dates use the saved timezone,
+including DST and times before 02:00; unlike recurring schedules, an event at 00:30
+belongs to its calendar date. The previous date's 08:00 message lists tomorrow's
+one-time tasks with exact local time/timezone, without selecting them. Notice-only
+groups send plain informational messages without Yes/No buttons. The event date's
+08:00 offer includes reminders with ordinary carryover and recurring candidates;
+Yes selects only today's linked, still-owned, unfinished, unchanged reminders.
+No never selects reminders. Tomorrow's notices are never accepted by today's Yes.
+Accepted reminders join daily summaries under ⏰ Reminders and expire at the
+following calendar day's 02:00; removal/expiry never clears completion or deletes
+the reminder. They never recur or carry over, and there is no alert at event time.
+
+Links snapshot exact instant/timezone. Rescheduling clears selection, preserves
+completion, and invalidates old buttons; description-only edits preserve selection.
+Deleting reminders cascades links. Candidates created after their morning group was
+sent/answered do not join that offer. The existing worker, retry lease, private-chat
+ownership, idempotent decisions and durable delivery state apply. Restart catches
+up still-valid morning groups only, without backfilling missed dates. A tomorrow
+notice is suppressed once that event date has started.
 
 ### Morning carryover offers
 

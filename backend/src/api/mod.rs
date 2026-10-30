@@ -2,6 +2,7 @@ mod auth;
 mod category;
 mod daily;
 mod error;
+mod reminder;
 mod scheduled;
 mod task;
 
@@ -12,7 +13,10 @@ use std::sync::Arc;
 use crate::{
     auth::TelegramAuth,
     domain::User,
-    service::{CategoryService, DailyService, MessageSender, ScheduledService, TaskService},
+    service::{
+        CategoryService, DailyService, MessageSender, ReminderService, ScheduledService,
+        TaskService,
+    },
 };
 
 #[derive(Clone)]
@@ -25,6 +29,7 @@ pub struct AppState {
 /// Services are constructed only after verification, with immutable user-scoped DAOs.
 #[derive(Clone)]
 pub(super) struct Workspace {
+    pub reminders: ReminderService,
     pub scheduled: ScheduledService,
     pub daily: DailyService,
     pub categories: CategoryService,
@@ -45,6 +50,22 @@ pub fn router(state: AppState) -> Router {
                 .delete(category::delete),
         )
         .route("/tasks", get(task::list).post(task::create))
+        .route(
+            "/reminder-tasks",
+            get(reminder::list).post(reminder::create),
+        )
+        .route(
+            "/reminder-tasks/{id}",
+            axum::routing::put(reminder::update).delete(reminder::delete),
+        )
+        .route(
+            "/reminder-tasks/{id}/completion",
+            axum::routing::put(reminder::complete),
+        )
+        .route(
+            "/reminder-tasks/{id}/daily",
+            axum::routing::delete(reminder::dismiss),
+        )
         .route(
             "/scheduled-tasks",
             get(scheduled::list).post(scheduled::create),

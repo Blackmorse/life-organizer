@@ -43,6 +43,9 @@ There are three logical app components but initially only two subprojects:
 - **Notifications:** Daily-list summaries and an 08:00 offer to carry unfinished picks into the new day through Yes/No bot buttons.
 - **Scheduled tasks:** Category-free recurring templates with required weekdays
   and saved IANA timezone. Due planning days receive independent daily occurrences.
+- **Reminder tasks:** Category-free one-time work with an exact date/time and saved
+  IANA timezone, without urgency. Morning messages give a day-before heads-up and
+  offer same-day inclusion in Tasks of the day.
 
 ## Current repository stage
 
@@ -105,6 +108,17 @@ a possible next feature. Destination links and launch-destination handling are
 not implemented; no deep-link format has been adopted yet. Backend would send
 the destination, frontend would expand/focus it, and existing user ownership
 checks would still apply. See the subproject guides for integration options.
+
+Reminder tasks have their own UI tab and user-owned `reminder_tasks` table.
+The saved timezone defines calendar dates: at 08:00 on the preceding date the
+bot lists tomorrow's reminders (informational only); at 08:00 on the event date
+it offers them alongside scheduled work and carryover with the existing Yes/No
+buttons. Notices also send without other daily work. Exact time appears in bot
+messages and UI. Acceptance adds reminders until the following calendar day's
+02:00; completion updates the reminder and daily expiry/removal preserves it.
+Reminders never recur or carry over. Rescheduling clears daily selection and old
+buttons cannot select changed dates/timezones. Completed reminders remain in their
+own tab and can be reopened. No separate event-time alert is sent.
 
 ## Guidance for future changes
 

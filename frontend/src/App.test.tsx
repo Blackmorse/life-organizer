@@ -3,15 +3,16 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { AppTheme } from './theme'
-import type { Category, DailyTask, Subtask, Task, ScheduledTask, ScheduledOccurrence } from './types'
+import type { Category, DailyTask, Subtask, Task, ScheduledTask, ScheduledOccurrence, ReminderTask } from './types'
 
 // Component-level tests run the real client and hook against a fake HTTP boundary.
-function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) {
+function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = [], initialReminders: ReminderTask[] = []) {
   let categories = [...initialCategories]
   let tasks = [...initialTasks]
   let daily: DailyTask[] = []
   let scheduled: ScheduledTask[] = []
   let occurrences: ScheduledOccurrence[] = []
+  let reminders: ReminderTask[] = [...initialReminders]
   const skipped = new Set<number>()
   let nextId = 100
   const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
@@ -20,6 +21,23 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) 
     const [, , resource, rawId, child] = url.split('/')
     const id = Number(rawId)
     const input = options?.body ? JSON.parse(String(options.body)) : undefined
+    if (resource === 'reminder-tasks') {
+      if (method === 'GET') return Response.json(reminders)
+      if (method === 'POST') {
+        const task = { ...input, id: nextId++, completed: false, expires_at: null }
+        reminders.push(task)
+        return Response.json(task, { status: 201 })
+      }
+      if (method === 'PUT') {
+        const task = { ...reminders.find((item) => item.id === id)!, ...input }
+        reminders = reminders.map((item) => item.id === id ? task : item)
+        return Response.json(task)
+      }
+      if (method === 'DELETE') {
+        reminders = child === 'daily' ? reminders.map((item) => item.id === id ? { ...item, expires_at: null } : item) : reminders.filter((item) => item.id !== id)
+        return new Response(null, { status: 204 })
+      }
+    }
     if (resource === 'scheduled-tasks') {
       if (rawId === 'daily') {
         if (method === 'GET') {
@@ -136,6 +154,64 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: `Actions for category ${category}` }))
     await user.click(await screen.findByRole('menuitem', { name: action }))
   }
+
+  it('creates exact-time reminders without urgency and retains failed edit drafts', async () => {
+    const fetchMock = mockApi()
+    const user = userEvent.setup()
+    renderWorkspace()
+    await screen.findByText('Your workspace is empty')
+    await user.click(screen.getByRole('tab', { name: 'Reminder tasks' }))
+    await user.click(screen.getByRole('button', { name: 'Add reminder task' }))
+    expect(screen.queryByRole('combobox', { name: 'Urgency' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save reminder' })).toBeDisabled()
+    await user.type(screen.getByRole('textbox', { name: 'Reminder description' }), 'Dentist appointment')
+    fireEvent.change(screen.getByLabelText(/Date and time/), { target: { value: '2027-03-08T15:30' } })
+    await user.click(screen.getByRole('button', { name: 'Save reminder' }))
+    await screen.findByText('Dentist appointment')
+    const create = fetchMock.mock.calls.find(([url, options]) => url === '/api/reminder-tasks' && options?.method === 'POST')!
+    expect(JSON.parse(String(create[1]?.body))).toEqual({ description: 'Dentist appointment', due_at: new Date('2027-03-08T15:30').getTime(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    await user.click(screen.getByRole('button', { name: 'Edit reminder' }))
+    const field = screen.getByRole('textbox', { name: 'Reminder description' })
+    await user.clear(field)
+    await user.type(field, 'Dentist checkup')
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Save reminder' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The API is unavailable')
+    expect(field).toHaveValue('Dentist checkup')
+    await user.click(screen.getByRole('button', { name: 'Save reminder' }))
+    await screen.findByText('Dentist checkup')
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.queryByText('Dentist checkup')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Reminder tasks' }))
+    await user.click(screen.getByRole('button', { name: 'Delete reminder' }))
+    await screen.findByText('No reminder tasks yet.')
+  })
+
+  it('tracks accepted reminders, resends saved completion and removes daily picks without deleting reminders', async () => {
+    const task = { id: 1, description: 'Appointment', due_at: new Date('2027-03-08T15:30Z').getTime(), timezone: 'Europe/Berlin', completed: false, expires_at: Date.now() + 86_400_000 }
+    const fetchMock = mockApi([], [], [task, { ...task, id: 2, description: 'Expired reminder', expires_at: Date.now() - 1000 }])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await screen.findByText('Your workspace is empty')
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByText('Reminder')).toBeInTheDocument()
+    expect(screen.queryByText('Expired reminder')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeEnabled()
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Appointment' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Appointment' })).not.toBeChecked()
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/daily-tasks/finalize')).toBe(false)
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Appointment' }))
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Complete daily Appointment' })).toBeChecked())
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/daily-tasks/finalize')).toBe(true)
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Appointment' }))
+    await waitFor(() => expect(screen.queryByText('Appointment')).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeDisabled()
+    await user.click(screen.getByRole('tab', { name: 'Reminder tasks' }))
+    expect(screen.getByText('Appointment')).toBeInTheDocument()
+    expect(screen.getByText('Completed')).toBeInTheDocument()
+  })
 
   it('creates required weekday schedules, edits future details, and tracks/skips today independently', async () => {
     const fetchMock = mockApi()
