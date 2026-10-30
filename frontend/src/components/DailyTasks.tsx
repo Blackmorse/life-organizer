@@ -8,12 +8,13 @@ import { ScheduledDaily } from './ScheduledDaily'
 
 import { DailyContext } from './DailyContext'
 
-export function DailyPickButton({ taskId, step, index, label, disabled }: {
-  taskId: number, step?: Subtask, index?: number, label: string, disabled: boolean
+export function DailyPickButton({ taskId, step, steps = [], index, label, disabled }: {
+  taskId: number, step?: Subtask, steps?: Subtask[], index?: number, label: string, disabled: boolean
 }) {
   const daily = useContext(DailyContext)
   if (!daily) return null
-  const selected = daily.picks.some((item) => item.task_id === taskId && item.subtask_id === (index === undefined ? '' : step?.id))
+  const picked = (id: string | undefined) => id !== undefined && daily.picks.some((item) => item.task_id === taskId && item.subtask_id === id)
+  const selected = index === undefined ? picked('') || (steps.length > 0 && steps.every((item) => picked(item.id))) : picked(step?.id)
   const action = `${selected ? 'Remove from' : 'Add to'} Tasks of the day: ${label}`
   return <Tooltip title={action}><span><IconButton size="small" color={selected ? 'primary' : 'default'} aria-label={action} aria-pressed={selected} disabled={disabled}
     onClick={() => void (selected ? daily.remove(taskId, step?.id ?? '') : daily.select(taskId, index))}>

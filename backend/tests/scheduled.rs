@@ -34,11 +34,31 @@ fn service(db: &TestDb, user: i64) -> ScheduledService {
     ScheduledService::new(Arc::new(PgScheduledDao::new(db.pool.clone(), user)))
 }
 
+async fn accept_scheduled(db: &TestDb) {
+    backend::dao::generate_scheduled(&db.pool, None)
+        .await
+        .unwrap();
+    let store = backend::dao::morning::MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let id: i64 = sqlx::query_scalar("UPDATE morning_offers SET due_at = statement_timestamp() - interval '1 second' RETURNING id")
+        .fetch_one(&db.pool).await.unwrap();
+    store.decide(id, support::TELEGRAM_ID, true).await.unwrap();
+}
+
 #[tokio::test]
 async fn recurring_progress_is_isolated_idempotent_owned_and_dismissible() {
     let db = TestDb::new().await;
     let svc = service(&db, db.user.id);
     let task = svc.save(None, input()).await.unwrap();
+    assert!(svc.daily().await.unwrap().is_empty());
+    assert!(
+        PgDailyDao::new(db.pool.clone(), db.user.id)
+            .summary()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    accept_scheduled(&db).await;
     let other = PgUserDao::new(db.pool.clone())
         .get_or_create(123)
         .await
@@ -68,9 +88,13 @@ async fn recurring_progress_is_isolated_idempotent_owned_and_dismissible() {
         .summary()
         .await
         .unwrap();
-    assert_eq!(summary.len(), 1);
+    assert_eq!(summary.len(), 2);
     assert_eq!(summary[0].task, "Sport exercises");
-    assert!(!summary[0].completed);
+    assert_eq!(summary[0].subtask.as_deref(), Some("Warm up"));
+    assert!(summary[0].category_id.is_none());
+    assert!(summary[0].completed);
+    assert_eq!(summary[1].subtask.as_deref(), Some("Run"));
+    assert!(summary[1].completed);
     assert!(
         PgDailyDao::new(db.pool.clone(), other.id)
             .summary()
@@ -294,6 +318,18 @@ async fn scheduled_routes_require_auth_schedule_and_owned_occurrences() {
     assert_eq!(status, 201);
     assert!(template.get("category_id").is_none());
     assert!(template.get("urgency").is_none());
+    assert_eq!(
+        call(
+            "GET",
+            "/scheduled-tasks/daily",
+            Value::Null,
+            support::TELEGRAM_ID
+        )
+        .await
+        .1,
+        json!([])
+    );
+    accept_scheduled(&db).await;
     let (status, daily) = call(
         "GET",
         "/scheduled-tasks/daily",
@@ -392,4 +428,34 @@ async fn removing_urgency_preserves_existing_schedules_and_daily_progress() {
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('scheduled_tasks','scheduled_occurrences') AND column_name='urgency'")
         .fetch_one(&db.pool).await.unwrap();
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn morning_opt_in_migration_preserves_existing_daily_progress_but_not_future_selection() {
+    let db = TestDb::new_at_version(10).await;
+    let svc = service(&db, db.user.id);
+    svc.save(None, input()).await.unwrap();
+    backend::dao::generate_scheduled(&db.pool, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scheduled_occurrences SET completed=true, subtasks='[{\"description\":\"Run\",\"completed\":true}]'")
+        .execute(&db.pool).await.unwrap();
+    backend::db::MIGRATOR.run(&db.pool).await.unwrap();
+    let current = svc.daily().await.unwrap();
+    assert_eq!(current.len(), 1);
+    assert!(current[0].completed);
+    assert!(current[0].subtasks[0].completed);
+    sqlx::query(
+        "SELECT generate_scheduled_occurrences($1, statement_timestamp() + interval '1 day')",
+    )
+    .bind(db.user.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let flags: Vec<bool> =
+        sqlx::query_scalar("SELECT selected FROM scheduled_occurrences ORDER BY planning_date")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(flags, vec![true, false]);
 }

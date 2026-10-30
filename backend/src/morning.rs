@@ -1,8 +1,9 @@
 //! Durable morning-offer orchestration. Telegram transport and SQL stay behind
 //! their own boundaries; callbacks never trust a client-supplied owner.
 use crate::{
+    bot_commands::{BotCommands, BotMessage},
     dao::morning::{Decision, MorningStore},
-    service::{NotificationError, summary_messages},
+    service::{MessageSender, NotificationError, ServiceError, summary_messages},
 };
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -11,6 +12,7 @@ use std::{sync::Arc, time::Duration};
 pub struct BotUpdate {
     pub id: i64,
     pub callback: Option<BotCallback>,
+    pub message: Option<BotMessage>,
 }
 
 pub struct BotCallback {
@@ -21,7 +23,8 @@ pub struct BotCallback {
 }
 
 #[async_trait]
-pub trait MorningBot: Send + Sync {
+pub trait MorningBot: MessageSender {
+    async fn configure_commands(&self) -> Result<(), NotificationError>;
     async fn offer(
         &self,
         recipient: i64,
@@ -35,6 +38,7 @@ pub trait MorningBot: Send + Sync {
 pub struct MorningWorker {
     pool: PgPool,
     store: MorningStore,
+    commands: BotCommands,
     bot: Arc<dyn MorningBot>,
 }
 
@@ -42,7 +46,8 @@ impl MorningWorker {
     pub fn new(pool: PgPool, bot: Arc<dyn MorningBot>) -> Self {
         Self {
             pool: pool.clone(),
-            store: MorningStore::new(pool),
+            store: MorningStore::new(pool.clone()),
+            commands: BotCommands::new(pool),
             bot,
         }
     }
@@ -58,8 +63,8 @@ impl MorningWorker {
             if !offer.items.is_empty() {
                 let messages = summary_messages(
                     &offer.items,
-                    "Unfinished tasks from your previous daily list",
-                    "Add this unfinished work to Tasks of the day?",
+                    "Suggested tasks for today: scheduled work and unfinished daily picks",
+                    "Add these tasks to Tasks of the day?",
                 );
                 self.bot.offer(offer.recipient, offer.id, &messages).await?;
             }
@@ -76,7 +81,7 @@ impl MorningWorker {
                 {
                     match self.store.decide(id, callback.sender, yes).await? {
                         Decision::Accepted(_) => {
-                            "Added unfinished work to Tasks of the day. Open or refresh the Mini App to see it."
+                            "Added tasks to Tasks of the day. Open or refresh the Mini App to see them."
                         }
                         Decision::Declined => "No tasks added.",
                         Decision::Unavailable => "This offer has expired or was already answered.",
@@ -87,6 +92,22 @@ impl MorningWorker {
                 // The choice is already durable/idempotent. A failed callback
                 // acknowledgement must not block later updates indefinitely.
                 let _ = self.bot.answer(&callback.id, text).await;
+            }
+            if let Some(message) = update.message
+                && let Err(error) = self.commands.handle(&message, self.bot.as_ref()).await
+            {
+                // Do not replay a possibly partially delivered summary or let
+                // one failed command block later commands and callbacks.
+                if !matches!(error, ServiceError::Notification(_)) {
+                    let _ = self
+                        .bot
+                        .send(
+                            message.sender,
+                            &["Could not load today's tasks. Please try /today again.".into()],
+                        )
+                        .await;
+                }
+                eprintln!("Bot command failed; the user can retry with /today.");
             }
             self.store.advance(update.id + 1).await?;
         }
@@ -130,6 +151,11 @@ pub async fn run(
                 .await
                 .unwrap_or(false);
             if leader {
+                if worker.bot.configure_commands().await.is_err() {
+                    eprintln!(
+                        "Bot command menu setup failed; commands remain available by typing them."
+                    );
+                }
                 let polling = async {
                     let mut interval = tokio::time::interval(Duration::from_secs(2));
                     loop {
@@ -142,7 +168,7 @@ pub async fn run(
                             break;
                         }
                         if worker.poll().await.is_err() {
-                            eprintln!("Telegram callback polling failed; will retry.");
+                            eprintln!("Telegram update polling failed; will retry.");
                         }
                     }
                 };

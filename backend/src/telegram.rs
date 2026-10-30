@@ -142,7 +142,7 @@ mod tests {
             (StatusCode::OK, json!({"ok":true,"result":[
                 {"update_id":9,"callback_query":{"id":"cb","from":{"id":123},"message":{"chat":{"id":123,"type":"private"}},"data":"morning:42:yes"}},
                 {"update_id":10,"callback_query":{"id":"group","from":{"id":123},"message":{"chat":{"id":-1,"type":"group"}},"data":"morning:42:no"}},
-                {"update_id":11,"message":{"text":"unrelated"}}
+                {"update_id":11,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"unrelated"}}
             ]})),
             (StatusCode::OK, json!({"ok":true})),
         ]).await;
@@ -178,11 +178,50 @@ mod tests {
         );
         assert_eq!(
             requests[2],
-            json!({"offset":9,"timeout":0,"allowed_updates":["callback_query"]})
+            json!({"offset":9,"timeout":0,"allowed_updates":["callback_query","message"]})
         );
         assert_eq!(
             requests[3],
             json!({"callback_query_id":"cb","text":"Added"})
+        );
+    }
+
+    #[tokio::test]
+    async fn registers_private_chat_commands_and_parses_message_identity() {
+        use crate::morning::MorningBot;
+        let bot = FakeBot::new(vec![
+            (StatusCode::OK, json!({"ok":true})),
+            (StatusCode::OK, json!({"ok":true,"result":[
+                {"update_id":1,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"/today"}},
+                {"update_id":2,"message":{"chat":{"id":-1,"type":"group"},"from":{"id":123},"text":"/today"}},
+                {"update_id":3,"message":{"chat":{"id":123,"type":"private"},"from":{"id":456},"text":"/today"}},
+                {"update_id":4,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123,"is_bot":true},"text":"/today"}},
+                {"update_id":5,"message":{"chat":{"id":123,"type":"private"},"text":"/today"}},
+                {"update_id":6,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"photo":[]}},
+                {"update_id":7,"edited_message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"/today"}}
+            ]})),
+        ]).await;
+        bot.sender.configure_commands().await.unwrap();
+        let updates = bot.sender.updates(0).await.unwrap();
+        let message = updates[0].message.as_ref().unwrap();
+        assert_eq!(message.sender, 123);
+        assert_eq!(message.private_chat, Some(123));
+        assert_eq!(message.text, "/today");
+        assert_eq!(updates[1].message.as_ref().unwrap().private_chat, None);
+        assert_eq!(updates[2].message.as_ref().unwrap().sender, 456);
+        assert_eq!(updates[2].message.as_ref().unwrap().private_chat, Some(123));
+        assert!(updates[3..].iter().all(|update| update.message.is_none()));
+        let requests = bot.state.requests.lock().unwrap();
+        assert_eq!(
+            requests[0],
+            json!({
+                "scope":{"type":"all_private_chats"},
+                "commands":[
+                    {"command":"today","description":"Show current Tasks of the day"},
+                    {"command":"help","description":"Show available commands"},
+                    {"command":"start","description":"Get started with Scheduler"}
+                ]
+            })
         );
     }
 

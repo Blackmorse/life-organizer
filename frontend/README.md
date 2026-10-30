@@ -10,8 +10,11 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   and save the schedule. Select all seven days for daily repetition. Device
   timezone is prefilled; schedules keep that saved IANA timezone. Optional
   ordered subtasks are supported; scheduled tasks have no urgency.
-  Due days automatically add a fresh unchecked occurrence to **Tasks of the day**,
-  marked **Scheduled**. Complete or skip today without stopping future repeats.
+  On due days, the bot offers a fresh unchecked occurrence at **8:00 AM** in the
+  schedule timezone. Press **Yes** to add it to **Tasks of the day**, marked
+  **Scheduled**, or **No** to skip. Nothing is added automatically. Scheduled-only
+  days get an offer too; work sharing the same timezone/day joins the carryover offer.
+  Complete or skip an accepted occurrence without stopping future repeats.
   Open the daily occurrence to track/edit its subtasks; completing every step
   completes today's occurrence only. Schedule edits affect future occurrences;
   deleting a schedule removes its occurrences too. No category is needed.
@@ -20,11 +23,16 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   is closed and catches up today's work after downtime, without adding missed days.
   The open app reloads scheduled occurrences every 30 seconds and on focus,
   clearing expired rows at rollover even if the network is unavailable.
-  Scheduled occurrences join finalized Telegram summaries and progress updates;
-  they do not produce morning carryover offers. Restart the backend to apply
-  migrations `0009_scheduled_tasks.sql` and `0010_scheduled_tasks_without_urgency.sql`
-  automatically. Existing scheduled details and progress are preserved.
+  Only accepted scheduled occurrences join finalized Telegram summaries and progress
+  updates. Expired occurrences never carry over; future due days get fresh offers.
+  Schedules created after an offer was sent or answered wait for their next due day.
+  Restart the backend to apply migration `0011_scheduled_morning_offers.sql`
+  automatically. Existing daily occurrences and progress stay visible; new days
+  require accepting the offer. Reopen or **Refresh** to load accepted work.
 - Use calendar buttons beside active tasks or subtasks to add/remove daily picks.
+  Adding a task with subtasks selects **all its current subtasks** instead of the
+  parent, preserving completed flags. The parent calendar fills a partial selection
+  or removes all steps when fully selected. Tasks without subtasks are picked whole.
   **Tasks of the day** shows a checklist linked to the original work. Selected
   subtasks appear indented beneath their bold parent task name, grouped
   together per task. Whole-task picks keep their own checkbox and remove button.
@@ -39,15 +47,21 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   Offers expire at the next **2:00 AM**. Reopen or **Refresh** the app to see restored
   picks. The backend must be running; after downtime, still-valid offers are sent.
 - In **Tasks of the day**, press **Finalize tasks** to receive the current list
-  from your bot in Telegram. The HTML message uses bold task names with selected
-  subtasks indented beneath. 🔹 marks unfinished picks; ✅ marks completed picks.
-  Whole-task picks appear once; category labels are omitted. Search does not limit what is
+  from your bot in Telegram. The HTML message groups work under bold **📁 category**
+  headings, with indented bold task names and subtasks indented one level deeper.
+  Category-free scheduled work uses **🔁 Scheduled**, with its occurrence subtasks.
+  Morning offers use the same hierarchy. 🔹 marks unfinished picks; ✅ marks completed
+  picks. 📋 marks context-only parent names above selected steps. Search does not limit what is
   sent. Your list stays editable; pressing Finalize again sends an updated list.
   Marking or unmarking daily work automatically sends a fresh summary after progress
   saves, including changes made from other tabs. Failed delivery keeps saved progress
   and shows guidance; use **Finalize tasks** to resend after checking your bot chat.
   Long lists arrive as multiple messages. Delivery failures leave picks intact;
   if delivery is uncertain, check the bot chat before retrying to avoid duplicates.
+- Send **`/today`** in the bot's private chat to receive your current daily list
+  again, including accepted scheduled tasks and saved progress. **`/start`** and
+  **`/help`** explain available commands. The backend registers these in Telegram's
+  command suggestions when it starts; restart the backend to enable the commands.
 - Complete tasks from expanded details to move them out of the **Active** tab
   into **Archive**. Archive keeps details and subtasks readable; **Restore** is
   its only task action. Restore before editing, moving, or deleting a task.

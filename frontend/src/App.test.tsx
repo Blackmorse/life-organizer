@@ -63,14 +63,17 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = []) 
       daily = daily.filter((item) => item.expires_at > Date.now())
       if (method === 'POST') {
         const task = tasks.find((item) => item.id === input.task_id)!
-        const step = input.subtask_index === undefined ? undefined : task.subtasks[input.subtask_index]
-        if (step && !step.id) step.id = String(nextId++)
-        const subtask_id = step?.id ?? ''
-        if (!daily.some((item) => item.task_id === task.id && item.subtask_id === subtask_id)) {
-          daily.push({ task_id: task.id, subtask_id, expires_at: Date.now() + 86_400_000 })
+        const steps = input.subtask_index === undefined ? task.subtasks : [task.subtasks[input.subtask_index]]
+        if (input.subtask_index === undefined && steps.length) daily = daily.filter((item) => item.task_id !== task.id || item.subtask_id !== '')
+        for (const step of steps.length ? steps : [undefined]) {
+          if (step && !step.id) step.id = String(nextId++)
+          const subtask_id = step?.id ?? ''
+          if (!daily.some((item) => item.task_id === task.id && item.subtask_id === subtask_id)) {
+            daily.push({ task_id: task.id, subtask_id, expires_at: Date.now() + 86_400_000 })
+          }
         }
       }
-      if (method === 'DELETE') daily = daily.filter((item) => item.task_id !== input.task_id || item.subtask_id !== input.subtask_id)
+      if (method === 'DELETE') daily = daily.filter((item) => item.task_id !== input.task_id || (input.subtask_id !== '' && item.subtask_id !== input.subtask_id))
       return Response.json(daily)
     }
     if (resource === 'categories') {
@@ -283,16 +286,16 @@ describe('workspace', () => {
     renderWorkspace()
     await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
     await user.click(screen.getByRole('button', { name: 'View task Build' }))
-    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Ship' }))
+    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Ship' })).toHaveAttribute('aria-pressed', 'true')
     await user.click(screen.getByRole('button', { name: 'Move subtask 2 up' }))
     await user.click(screen.getByRole('button', { name: 'Edit subtask 1' }))
     await user.clear(screen.getByRole('textbox', { name: 'Subtask description' }))
     await user.type(screen.getByRole('textbox', { name: 'Subtask description' }), 'Release')
     await user.click(screen.getByRole('button', { name: 'Save subtask' }))
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
-    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).not.toBeChecked()
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Build' })).not.toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).not.toBeChecked()
-    expect(screen.queryByRole('checkbox', { name: 'Complete daily Design' })).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Design' })).not.toBeChecked()
     const sends = () => fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')
     expect(sends()).toHaveLength(0)
     await user.click(screen.getByRole('checkbox', { name: 'Complete daily Release' }))
@@ -307,11 +310,11 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
     expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).toBeChecked()
-    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Build' }))
-    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeChecked()
+    await user.click(screen.getByRole('checkbox', { name: 'Complete daily Design' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Design' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'Complete daily Release' })).toBeDisabled()
     expect(sends()).toHaveLength(4)
-    expect(fetchMock.mock.calls.slice(-2).map(([url]) => url)).toEqual(['/api/tasks/1/completion', '/api/daily-tasks/finalize'])
+    expect(fetchMock.mock.calls.slice(-2).map(([url]) => url)).toEqual(['/api/tasks/1/subtasks', '/api/daily-tasks/finalize'])
     await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Release' }))
     expect(screen.queryByRole('checkbox', { name: 'Complete daily Release' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'Archive' }))
@@ -358,7 +361,7 @@ describe('workspace', () => {
     expect(await screen.findByText("Today's tasks sent to your Telegram bot chat.")).toBeInTheDocument()
   })
 
-  it('resends a picked parent when its last subtask completes from Active', async () => {
+  it('resends selected steps when their parent auto-completes from Active', async () => {
     const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
       { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [{ description: 'Ship', completed: false }] },
     ])
@@ -369,7 +372,40 @@ describe('workspace', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Subtask 1: Ship' }))
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')).toHaveLength(1)
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
-    expect(screen.getByRole('checkbox', { name: 'Complete daily Build' })).toBeChecked()
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Build' })).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Ship' })).toBeChecked()
+  })
+
+  it('adds all parent steps, fills partial selections, and removes them together without losing progress', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [
+        { description: 'Design', completed: true }, { description: 'Ship', completed: false },
+      ] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'View task Build' }))
+    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Ship' }))
+    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' })).toHaveAttribute('aria-pressed', 'true')
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Build' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2)
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Design' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Ship' })).not.toBeChecked()
+    await user.click(screen.getByRole('tab', { name: 'Active' }))
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' })).toHaveAttribute('aria-pressed', 'true')
+    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
+    expect(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    expect(screen.getByRole('checkbox', { name: 'Subtask 1: Design' })).toBeChecked()
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeDisabled()
   })
 
   it('keeps daily picks on failed removal and clears expired picks when app resumes', async () => {

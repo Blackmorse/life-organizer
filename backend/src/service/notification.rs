@@ -29,37 +29,55 @@ pub(crate) fn summary_messages(
     title: &str,
     footer: &str,
 ) -> Vec<String> {
-    let mut groups = std::collections::BTreeMap::<i64, Vec<&DailyTaskSummary>>::new();
+    let mut categories = std::collections::BTreeMap::<
+        Option<i64>,
+        std::collections::BTreeMap<i64, Vec<&DailyTaskSummary>>,
+    >::new();
     for item in items {
-        groups.entry(item.task_id).or_default().push(item);
+        categories
+            .entry(item.category_id)
+            .or_default()
+            .entry(item.task_id)
+            .or_default()
+            .push(item);
     }
     let mut html = HtmlMessages::default();
     html.append(title, true);
     html.append("\n\n", false);
-    for group in groups.values() {
-        // Context-only parents are not selected work, so have no status emoji.
-        let parent = group.iter().find(|item| item.subtask.is_none());
-        let prefix = parent.map_or("", |item| if item.completed { "✅ " } else { "🔹 " });
-        html.append(&format!("{prefix}{}", group[0].task), true);
+    for (category_id, groups) in categories {
+        let heading = if category_id.is_some() {
+            format!("📁 {}", groups.values().next().unwrap()[0].category)
+        } else {
+            "🔁 Scheduled".into()
+        };
+        html.append(&indented(&heading, 0), true);
         html.append("\n", false);
-        for item in group.iter().filter(|item| item.subtask.is_some()) {
-            let mark = if item.completed { "✅" } else { "🔹" };
-            // NBSP indentation survives Telegram rendering and explicit newlines.
-            let description = item
-                .subtask
-                .as_ref()
-                .unwrap()
-                .replace('\n', "\n\u{a0}\u{a0}\u{a0}\u{a0}  ");
-            html.append(
-                &format!("\u{a0}\u{a0}\u{a0}\u{a0}{mark} {description}\n"),
-                false,
-            );
+        for group in groups.values() {
+            // Context-only parents get a task icon rather than a completion mark.
+            let parent = group.iter().find(|item| item.subtask.is_none());
+            let prefix = parent.map_or("📋 ", |item| if item.completed { "✅ " } else { "🔹 " });
+            html.append(&indented(&format!("{prefix}{}", group[0].task), 1), true);
+            html.append("\n", false);
+            for item in group.iter().filter(|item| item.subtask.is_some()) {
+                let mark = if item.completed { "✅" } else { "🔹" };
+                html.append(
+                    &indented(&format!("{mark} {}", item.subtask.as_ref().unwrap()), 2),
+                    false,
+                );
+                html.append("\n", false);
+            }
+            html.append("\n", false);
         }
-        html.append("\n", false);
     }
     html.append(footer, false);
     html.flush();
     html.messages
+}
+
+// NBSP indentation survives Telegram rendering; continuation lines stay nested.
+fn indented(text: &str, depth: usize) -> String {
+    let padding = "\u{a0}".repeat(depth * 4);
+    format!("{padding}{}", text.replace('\n', &format!("\n{padding}  ")))
 }
 
 /// Split rendered text, never raw HTML. Each message has balanced tags and whole
@@ -126,6 +144,7 @@ mod tests {
     fn long_unicode_lists_are_complete_and_within_telegram_limits() {
         let item = DailyTaskSummary {
             task_id: 1,
+            category_id: Some(1),
             category: "Work <&>".into(),
             task: "<&>😀".repeat(2000),
             subtask: Some("<&>😀".repeat(2000)),
@@ -155,8 +174,10 @@ mod tests {
         assert_eq!(
             visible(&messages.concat()),
             format!(
-                "Tasks for today are ready!\n\n{}\n\u{a0}\u{a0}\u{a0}\u{a0}✅ {}\n\n",
+                "Tasks for today are ready!\n\n📁 Work <&>\n{}📋 {}\n{}✅ {}\n\n",
+                "\u{a0}".repeat(4),
                 item.task,
+                "\u{a0}".repeat(8),
                 item.subtask.unwrap(),
             )
         );
@@ -166,7 +187,8 @@ mod tests {
     fn groups_selected_steps_by_identity_and_uses_status_emoji() {
         let item = |task_id, task: &str, subtask: Option<&str>, completed| DailyTaskSummary {
             task_id,
-            category: "Hidden category".into(),
+            category_id: Some(1),
+            category: "Work <&>".into(),
             task: task.into(),
             subtask: subtask.map(String::from),
             completed,
@@ -180,9 +202,43 @@ mod tests {
         ]);
         assert_eq!(
             messages,
-            vec![
-                "<b>Tasks for today are ready!</b>\n\n<b>Build &lt;app&gt;</b>\n\u{a0}\u{a0}\u{a0}\u{a0}🔹 Design &amp; plan\n\u{a0}\u{a0}\u{a0}\u{a0}✅ Ship\n\n<b>🔹 Clean</b>\n\n<b>✅ Build &lt;app&gt;</b>\n\u{a0}\u{a0}\u{a0}\u{a0}🔹 Follow up\n\n"
-            ]
+            vec![format!(
+                "<b>Tasks for today are ready!</b>\n\n<b>📁 Work &lt;&amp;&gt;</b>\n<b>{indent}📋 Build &lt;app&gt;</b>\n{indent}{indent}🔹 Design &amp; plan\n{indent}{indent}✅ Ship\n\n<b>{indent}🔹 Clean</b>\n\n<b>{indent}✅ Build &lt;app&gt;</b>\n{indent}{indent}🔹 Follow up\n\n",
+                indent = "\u{a0}".repeat(4)
+            )]
         );
+    }
+
+    #[test]
+    fn category_identity_scheduled_section_and_multiline_indentation_are_preserved() {
+        let item = |task_id, category_id, task: &str, subtask: Option<&str>| DailyTaskSummary {
+            task_id,
+            category_id,
+            category: "Same <&>\ncategory".into(),
+            task: task.into(),
+            subtask: subtask.map(String::from),
+            completed: false,
+        };
+        let messages = summary_messages(
+            &[
+                item(1, Some(1), "First\ntask", Some("First\nstep")),
+                item(2, Some(2), "Second", None),
+                item(3, Some(1), "Third", None),
+                item(-1, None, "Exercise", Some("Warm up")),
+            ],
+            "Morning",
+            "Add these?",
+        );
+        let text = messages.concat();
+        let indent = "\u{a0}".repeat(4);
+        assert_eq!(text.matches("📁 Same &lt;&amp;&gt;").count(), 2);
+        assert_eq!(text.matches("🔁 Scheduled").count(), 1);
+        assert!(text.find("Third").unwrap() < text.find("Second").unwrap());
+        assert!(text.contains(&format!("<b>{indent}📋 First\n{indent}  task</b>")));
+        assert!(text.contains(&format!("{indent}{indent}🔹 First\n{indent}{indent}  step")));
+        assert!(text.contains(&format!(
+            "<b>{indent}📋 Exercise</b>\n{indent}{indent}🔹 Warm up"
+        )));
+        assert!(text.ends_with("Add these?"));
     }
 }

@@ -1,5 +1,6 @@
 use super::TelegramSender;
 use crate::{
+    bot_commands::BotMessage,
     morning::{BotCallback, BotUpdate, MorningBot},
     service::{MessageSender, NotificationError},
 };
@@ -17,6 +18,7 @@ struct Updates {
 struct Update {
     update_id: i64,
     callback_query: Option<Callback>,
+    message: Option<Message>,
 }
 #[derive(Deserialize)]
 struct Callback {
@@ -28,10 +30,14 @@ struct Callback {
 #[derive(Deserialize)]
 struct Sender {
     id: i64,
+    #[serde(default)]
+    is_bot: bool,
 }
 #[derive(Deserialize)]
 struct Message {
     chat: Chat,
+    from: Option<Sender>,
+    text: Option<String>,
 }
 #[derive(Deserialize)]
 struct Chat {
@@ -79,6 +85,20 @@ impl TelegramSender {
 
 #[async_trait]
 impl MorningBot for TelegramSender {
+    async fn configure_commands(&self) -> Result<(), NotificationError> {
+        self.call_ok(
+            "setMyCommands",
+            json!({
+                "scope": {"type": "all_private_chats"},
+                "commands": [
+                    {"command": "today", "description": "Show current Tasks of the day"},
+                    {"command": "help", "description": "Show available commands"},
+                    {"command": "start", "description": "Get started with Scheduler"}
+                ]
+            }),
+        )
+        .await
+    }
     async fn offer(
         &self,
         recipient: i64,
@@ -108,7 +128,7 @@ impl MorningBot for TelegramSender {
         let updates: Updates = self
             .call(
                 "getUpdates",
-                json!({"offset": offset, "timeout": 0, "allowed_updates": ["callback_query"]}),
+                json!({"offset": offset, "timeout": 0, "allowed_updates": ["callback_query", "message"]}),
             )
             .await?
             .json()
@@ -130,6 +150,14 @@ impl MorningBot for TelegramSender {
                         .filter(|message| message.chat.kind == "private")
                         .map(|message| message.chat.id),
                     data: callback.data.unwrap_or_default(),
+                }),
+                message: update.message.and_then(|message| {
+                    let from = message.from.filter(|from| !from.is_bot)?;
+                    Some(BotMessage {
+                        sender: from.id,
+                        private_chat: (message.chat.kind == "private").then_some(message.chat.id),
+                        text: message.text?,
+                    })
                 }),
             })
             .collect())

@@ -45,6 +45,8 @@ pub struct DailyTask {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyTaskSummary {
     pub task_id: i64,
+    /// None for category-free scheduled occurrences.
+    pub category_id: Option<i64>,
     pub category: String,
     pub task: String,
     pub subtask: Option<String>,

@@ -17,7 +17,9 @@ standalone browser.
 - Scheduled tasks tab manages category-free recurring tasks with description,
   ordered subtask templates, required weekday selection, and saved IANA
   timezone (initially the device timezone). Select all weekdays for every day.
-  Due occurrences automatically appear in Tasks of the day with a Scheduled badge.
+  Due occurrences are offered by the bot at 08:00 in their saved timezone, even
+  without ordinary carryover. Yes adds them to Tasks of the day with a Scheduled
+  badge; No leaves them out. Reads never automatically select scheduled work.
   Completion, subtask edits, and removal affect that occurrence only; removing
   skips today without regenerating on refresh. Template edits affect future
   snapshots; deletion removes the schedule and its occurrences. No template archive.
@@ -25,11 +27,16 @@ standalone browser.
   Current scheduled occurrences refresh every 30 seconds while visible and on focus;
   an independent timer clears expired rows at rollover even if a request hangs.
   Backend generation also runs while the app is closed and catches
-  up the current day after downtime. No missed-day backfill or morning carryover.
+  up current-day candidates after downtime. No missed-day backfill or scheduled
+  carryover; each due day gets fresh candidates. Reopen/Refresh loads accepted work.
   Scheduled progress changes resend the current Telegram summary after saving.
 - Tasks of the day tab tracks whole-task and individual-subtask picks with
   completion checkboxes and remove buttons. Calendar buttons beside active task
-  rows and subtask rows toggle selection. Selected subtasks are grouped by task ID
+  rows and subtask rows toggle selection. Adding a task with subtasks selects all
+  its current steps instead of the parent, preserving completed flags. Its parent
+  calendar is selected when all steps are picked; clicking it removes all picks
+  for that task. Partial selections can be filled by adding the parent again.
+  Tasks without subtasks remain whole-task picks. Selected subtasks are grouped by task ID
   beneath a single bold parent task name in an indented nested list. Context-only
   parents have no completion/remove controls; selected whole tasks keep theirs.
   Picks persist through the backend;
@@ -41,6 +48,8 @@ standalone browser.
   from the previous daily list with Yes/No buttons. Yes restores still-eligible
   picks until next local 02:00; No dismisses. Reopen/Refresh loads bot-restored picks.
 - Finalize tasks sends all current daily picks to the user's private bot chat,
+  grouped under bold 📁 category headings, with indented tasks and deeper-indented
+  subtasks. Category-free scheduled work uses a 🔁 Scheduled section.
   independent of the search filter. Empty lists and in-flight writes disable the
   button. Success appears only after confirmed API success; errors retain picks
   and surface Start/unblock or partial-delivery guidance. Finalization does not
@@ -50,6 +59,8 @@ standalone browser.
   parent auto-completion, from any tab. Writes and sends remain serialized.
   Failed completion saves never send. Delivery failure keeps saved progress and
   shows separate delivery/retry guidance; Finalize tasks can resend manually.
+  Users can also send `/today` in the bot's private chat to fetch the same current
+  list; `/start` and `/help` explain commands. Backend registers command suggestions.
 
 - Read-first category/task hierarchy, with compact rows and expandable details.
 - Active and Archive tabs. Complete moves a task into the archive; Restore returns
@@ -100,7 +111,7 @@ standalone browser.
 | `src/hooks/useWorkspace.ts` | Initial loading, refresh, serialized mutations, authoritative response state. |
 | `src/components/CategoryTree.tsx` | Expandable category/task hierarchy, search filtering, and category actions. |
 | `src/components/CategoryForm.tsx` | Shared on-demand category create/rename form. |
-| `src/components/TaskForm.tsx` | Shared create/edit form with category selection. |
+| `src/components/TaskForm.tsx` | Shared create/edit form with category and urgency selection. |
 | `src/components/TaskCard.tsx` | Compact task row, expandable read view, and edit/move/delete actions. |
 | `src/components/Subtasks.tsx` | Numbered checklist, progress, direct add, and per-row inline edit/delete/reorder actions. |
 | `src/components/DailyTasks.tsx`, `DailyContext.ts` | Daily checklist, calendar pick controls, and shared selection actions. |
@@ -129,6 +140,20 @@ Keep mutation controls disabled while loading/saving to prevent duplicate writes
 Use visible labels, keyboard-accessible buttons, announced errors/status, and
 mobile-friendly layouts. Retain standalone-browser behavior when adding Telegram
 features. Do not invent API fields absent from the backend contract.
+
+## Bot-to-Mini-App navigation (discussed, not implemented)
+
+Bot messages could open a category/task directly. With a Main Mini App
+configured in BotFather, a Telegram link can carry `startapp=category_42`;
+Telegram exposes it as `start_param` in launch data and `tgWebAppStartParam`
+in the URL. A private-chat `web_app` button can instead supply an ordinary app
+URL query parameter. These are options; no destination format is adopted yet.
+
+Future handling should parse navigation hints behind the Telegram adapter,
+load the authenticated workspace, then expand the target category, scroll to
+it, and optionally open task details. Missing/inaccessible destinations should
+show an unavailable state. Launch parameters do not grant access or establish
+identity; backend verification of raw signed initData remains authoritative.
 
 ## API and development configuration
 
@@ -168,7 +193,7 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
   responses add `id`. Weekdays are distinct ISO numbers 1 (Monday) through 7
   (Sunday), with at least one required. No category, urgency, or step IDs. Failed
   saves retain drafts. Save schedule stays disabled while editing a subtask draft.
-- `GET /scheduled-tasks/daily` returns `{id, scheduled_task_id, description,
+- `GET /scheduled-tasks/daily` returns only accepted occurrences as `{id, scheduled_task_id, description,
   subtasks, completed, expires_at}[]`. Progress endpoints are
   `PUT /scheduled-tasks/daily/{id}/completion` with `{completed}` and
   `PUT /scheduled-tasks/daily/{id}/subtasks` with `{subtasks}`. DELETE on
@@ -179,7 +204,9 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
 - `GET /daily-tasks` returns `{task_id, subtask_id, expires_at}[]` (expiry in Unix
   milliseconds; empty subtask ID means whole task). `POST /daily-tasks` accepts
   `{task_id, timezone, subtask_index?}` and `DELETE /daily-tasks` accepts
-  `{task_id, subtask_id}`; both return the current picks. Adding a step may assign
+  `{task_id, subtask_id}`; both return the current picks. Omitted `subtask_index`
+  selects every current subtask, or the whole task when none exist. Empty
+  `subtask_id` on DELETE removes all picks for that task. Adding steps may assign
   its stable ID, so the hook reloads tasks before publishing picks. Expiry is
   server-enforced; changing device timezone does not alter existing picks' expiry.
 - `POST /daily-tasks/finalize` has no body and returns `204` after Telegram accepts

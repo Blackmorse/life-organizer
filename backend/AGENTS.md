@@ -15,6 +15,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Rust edition 2024; Axum 0.8 HTTP server running on Tokio.
 - SQLx 0.8 provides PostgreSQL pooling, queries, and embedded versioned migrations.
 - Category and task CRUD are implemented through DAO, service, and API layers.
+- Task urgency is implemented end-to-end: Someday (default), Upcoming, and Soon.
 - Tasks support optional ordered subtasks with descriptions and completion flags,
   replaced atomically. A nonempty fully completed list auto-completes the parent.
 - Task completion/restoration is implemented. Completed tasks form a read-only
@@ -26,8 +27,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   Users are registered automatically; category/task operations are user-scoped.
 - Daily-list finalization sends a summary to the verified user's private Telegram
   chat through the existing bot token, using reqwest with rustls. A background
-  worker sends 08:00 rollover offers and polls Telegram callback queries for
-  Yes/No responses. Subcategories and implementation plans
+  worker sends 08:00 rollover offers and polls Telegram messages and callback
+  queries for private-chat commands and Yes/No responses. Subcategories and implementation plans
   are not implemented yet.
 
 ### Module layout
@@ -38,8 +39,9 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/config.rs` | Read environment-based server configuration. |
 | `src/auth.rs` | Telegram initData HMAC verification, freshness checks, and signed identity extraction. |
 | `src/telegram.rs` | Outbound Telegram Bot API adapter, bounded requests, sanitized delivery errors. |
-| `src/telegram/morning.rs` | Morning-offer buttons, callback polling and acknowledgements. |
-| `src/morning.rs` | Morning-offer orchestration, periodic delivery, durable callback processing, singleton worker lifecycle. |
+| `src/telegram/morning.rs` | Morning-offer buttons, command-menu registration, message/callback polling and acknowledgements. |
+| `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
+| `src/bot_commands.rs` | Private-chat `/today`, `/start`, and `/help` commands using user-scoped application services. |
 | `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
 | `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
 | `src/service/notification.rs` | Transport-independent message sender boundary and daily summary formatting. |
@@ -125,13 +127,13 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | POST | `/scheduled-tasks` | Create a category-free recurring template (`201`). |
 | PUT | `/scheduled-tasks/{id}` | Replace template details/schedule (`200`). |
 | DELETE | `/scheduled-tasks/{id}` | Delete template and its occurrences (`204`). |
-| GET | `/scheduled-tasks/daily` | Generate and list today's visible, unexpired occurrences (`200`). |
+| GET | `/scheduled-tasks/daily` | Generate candidates and list today's accepted, visible, unexpired occurrences (`200`). |
 | PUT | `/scheduled-tasks/daily/{id}/completion` | Set occurrence completion; return current occurrences (`200`). |
 | PUT | `/scheduled-tasks/daily/{id}/subtasks` | Replace occurrence steps and recalculate completion; return occurrences (`200`). |
 | DELETE | `/scheduled-tasks/daily/{id}` | Skip occurrence for today only; return current occurrences (`200`). |
 | GET | `/daily-tasks` | Current user's unexpired daily picks (`200`). |
-| POST | `/daily-tasks` | Select a whole task or one subtask; return current picks (`200`). |
-| DELETE | `/daily-tasks` | Remove a pick only; return current picks (`200`). |
+| POST | `/daily-tasks` | Select all task subtasks (or the task if none), or one subtask; return current picks (`200`). |
+| DELETE | `/daily-tasks` | Remove one step or all picks for a task; return current picks (`200`). |
 | POST | `/daily-tasks/finalize` | Send the current daily list to the verified user's private bot chat (`204`). |
 | POST | `/categories` | Create category (`201`). |
 | GET | `/categories` | List categories ordered by ID (`200`). |
@@ -141,7 +143,7 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | POST | `/tasks` | Create task (`201`). |
 | GET | `/tasks` | List all active and archived tasks ordered by ID (`200`); optional `?category_id=123`. |
 | GET | `/tasks/{id}` | Read task (`200`). |
-| PUT | `/tasks/{id}` | Replace description and category (`200`). |
+| PUT | `/tasks/{id}` | Replace description, category, and urgency (`200`). |
 | DELETE | `/tasks/{id}` | Delete task (`204`). |
 | PUT | `/tasks/{id}/subtasks` | Replace ordered subtasks and return updated task (`200`). |
 | PUT | `/tasks/{id}/completion` | Complete/archive or restore task; return updated task (`200`). |
@@ -149,12 +151,16 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 Category POST/PUT JSON: `{"description":"Work"}`.
 
 Daily POST JSON: `{"task_id":1,"timezone":"Europe/Berlin"}`; optional
-`"subtask_index":0` selects a zero-based step instead of its parent. The backend
+`"subtask_index":0` selects a zero-based step. Without an index, a task with
+subtasks selects every current step instead of the parent; completed flags are
+preserved. Tasks without steps select the parent. Bulk selection assigns any
+missing stable IDs atomically, replaces a legacy whole-task pick, and upserts
+steps without duplicates. The backend
 validates the timezone against PostgreSQL's timezone catalog, locks the owned
-active parent, assigns a stable step ID if needed, and upserts the pick.
+active parent, assigns stable step IDs if needed, and upserts picks.
 Missing/inaccessible tasks or steps return `404`; archived parents return `409`.
-Daily DELETE JSON: `{"task_id":1,"subtask_id":""}` for a whole-task pick, or use
-the returned string step ID. Removal is idempotent, scoped, and allowed after
+Daily DELETE JSON: `{"task_id":1,"subtask_id":""}` removes all picks for that task,
+or use the returned string step ID to remove only that step. Removal is idempotent, scoped, and allowed after
 completion. Inputs reject unknown fields. Responses are arrays of
 `{task_id, subtask_id, expires_at}`, where `expires_at` is Unix milliseconds.
 Migration `0007_daily_tasks.sql` adds the daily table and optional step identities.
@@ -170,12 +176,16 @@ Finalization accepts no input fields: recipient is the authenticated user's
 verified Telegram ID, never a client-supplied chat ID. One user-scoped SQL snapshot
 resolves unexpired picks with current task/subtask descriptions and completion
 flags, ordered by task ID and current subtask order. The application formats a
-HTML "Tasks for today are ready!" list with bold task headings and indented
-selected subtasks. Whole-task picks appear once; when both a task and its steps
+HTML "Tasks for today are ready!" list with bold 📁 category headings, indented
+bold task headings, and selected subtasks indented one level deeper. Category-free
+scheduled work appears under 🔁 Scheduled, including its occurrence subtasks.
+Whole-task picks appear once; when both a legacy task pick and its steps
 are picked, steps appear below the same heading. Selected work uses 🔹 for
 unfinished picks and ✅ for completed picks. Context-only parents have no status
-emoji. Groups use task IDs so duplicate names stay separate; categories are
-omitted. All descriptions are HTML-escaped. The adapter uses `parse_mode: "HTML"`
+emoji; they use 📋 to identify the parent task instead. Groups use category and
+task IDs so duplicate names stay separate.
+Morning offers share the same category/task hierarchy. All descriptions are
+HTML-escaped, including multiline category names. The adapter uses `parse_mode: "HTML"`
 without inline keyboards. Long summaries split at 4096 rendered UTF-16 units,
 preserving full descriptions with balanced tags and intact entities.
 Empty/expired lists return `400` without sending. Unstarted/blocked bot chats return
@@ -188,6 +198,24 @@ task progress are unchanged by finalization. The shared HTTP client has 5-second
 connect and 15-second per-request timeouts and does not follow redirects.
 Bot users must first open the private chat and press Start/send `/start`, and must
 not block the bot. No additional token or chat-ID environment variable is needed.
+
+### Private-chat bot commands
+
+- `/today` sends the current server-resolved Tasks of the day, including accepted
+  scheduled occurrences, using the same category hierarchy, completion flags,
+  escaping, and message splitting as Mini App finalization. Empty lists get a
+  short reply explaining how to add work. It does not select or complete tasks.
+- `/start` and `/help` explain `/today` and direct users to the Mini App for edits.
+- The elected worker registers these commands with Telegram's `setMyCommands`
+  using `all_private_chats` scope at startup. Registration failure is logged
+  without stopping typed commands; restarting retries menu setup.
+- Incoming Telegram sender identity determines the user and reply recipient.
+  Only positive sender IDs matching a private chat ID are handled. Group chats,
+  mismatched identities, bot senders, non-text/edited messages, and unrelated text
+  are ignored. Bare commands are supported; addressed `@bot` forms are ignored.
+- Commands reuse `DailyService::current_messages` and the owned daily DAO.
+  Their update offset advances even on delivery failure to avoid blocking later
+  callbacks or replaying partially sent summaries. Send `/today` again to retry.
 
 ### Scheduled tasks
 
@@ -211,12 +239,14 @@ Descriptions and step descriptions must be nonblank. Unknown fields are rejected
 `generate_scheduled_occurrences(owner_id, instant)` generates only the current
 planning day, using `daily_reset_at` and local calendar dates (including DST).
 Planning days start at 02:00; before then, the previous weekday still applies.
-An occurrence snapshots description and steps, all initially unchecked.
+An occurrence snapshots description, timezone, and steps, all initially unchecked.
+New occurrences are unselected candidates, absent from daily reads and summaries
+until the owner accepts their morning offer. Progress writes and removal require selection.
 Uniqueness on `(scheduled_task_id, planning_date)` prevents duplicates under
 concurrent sweeps/requests. Generation runs every 30 seconds in the existing worker,
 on scheduled daily reads, and before summary resolution. Restart catches up today's
-due work only; missed days are not backfilled. New due templates appear immediately
-on the next daily read, including creation during the current planning day.
+due candidates only; missed days are not backfilled. New due templates generate
+candidates on the next daily read, but never automatically join the daily list.
 
 Daily responses contain `{id, scheduled_task_id, description, subtasks,
 completed, expires_at}` with expiry in Unix milliseconds. Completion accepts
@@ -229,11 +259,18 @@ today's occurrence. Template edits affect future snapshots, preserving today's
 progress; template deletion cascades to all its occurrences. Occurrence snapshots
 remain stored after expiry but are excluded from all active reads and summaries.
 
-Finalization includes visible unexpired occurrences with ordinary picks in the
+Finalization includes selected visible unexpired occurrences with ordinary picks in the
 same SQL snapshot. Internal negative occurrence IDs separate summary groups from
 positive ordinary task IDs; API identities remain positive and use separate routes.
-Scheduled occurrences do not enter morning carryover offers. Each scheduled day
-already creates fresh work regardless of previous completion.
+Migration `0011_scheduled_morning_offers.sql` adds selection state, snapshot timezones,
+and durable `morning_offer_scheduled_items` links. Existing occurrences retain their
+selection and progress; future occurrences require opt-in. Each due planning day
+gets an 08:00 offer in its saved timezone, even without ordinary carryover. Matching
+owner/timezone/reset offers combine both types of work. Yes selects only linked,
+still-owned, unexpired, unfinished, unhidden occurrences atomically with ordinary
+picks. No leaves candidates unselected. Scheduled occurrences never carry over;
+future due days get fresh candidates regardless of previous decisions/progress.
+Candidates created after an offer is sent or answered are not added to that offer.
 
 ### Morning carryover offers
 
@@ -246,6 +283,7 @@ timezone, and reset instant; `morning_offer_items` retains stable task/step link
 This preserves yesterday's work without keeping it in today's active list.
 
 At 08:00 local time on the reset date, the bot sends the still-unfinished work
+and any linked scheduled candidates due that day
 with Yes/No inline buttons. Local calendar arithmetic and PostgreSQL timezone
 rules apply, including DST. Completed/deleted work is filtered again before
 delivery and acceptance. Empty offers send nothing. Yes atomically adds eligible
@@ -257,7 +295,8 @@ callback from their private chat is accepted, using identity returned by Telegra
 Reopen or refresh the Mini App to load picks restored through the bot.
 
 The backend starts a worker automatically with the existing bot token. It sweeps
-every 30 seconds and polls `getUpdates` every 2 seconds for `callback_query` only.
+every 30 seconds and polls `getUpdates` every 2 seconds for `callback_query` and
+`message` updates.
 A dedicated PostgreSQL advisory-lock session elects one worker per database;
 other instances wait. Keep this token's webhook disabled and do not run another
 poller for the same bot. No webhook endpoint or additional service is required.
@@ -308,6 +347,20 @@ Service errors use `{"error":"message"}`: invalid input `400`, missing entity or
 referenced category `404`, nonempty category deletion or archived task write `409`, storage failure
 `500` with no database details exposed. Malformed JSON/path/query inputs use
 Axum's extractor rejection responses (including `400`, `415`, and `422`).
+
+### Bot-to-Mini-App links (discussed, not implemented)
+
+Future bot messages can use `sendMessage` with inline URL buttons or text links
+to launch a Mini App at a category/task. One option, after configuring a Main
+Mini App in BotFather, is `https://t.me/<bot_username>?startapp=category_42`.
+The payload format is illustrative, not an implemented contract. A private-chat
+`web_app` inline button can instead target the HTTPS app URL with a destination
+query parameter. Main Mini App setup is separate from the existing menu button.
+
+Keep message sending and link construction in Telegram-specific integration;
+reuse user-scoped application services for selecting records. Destination IDs
+are navigation hints, not access grants. Existing Mini App authentication and
+ownership checks must apply when the frontend loads the destination.
 
 ## Architecture and modularity
 

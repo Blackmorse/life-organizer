@@ -45,7 +45,7 @@ export function ScheduledTasks({ tasks, query, disabled, onSave, onDelete }: {
   const [expanded, setExpanded] = useState<number | null>(null)
   const visible = tasks.filter((task) => [task.description, ...task.subtasks.map((step) => step.description)].some((text) => text.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))
   return <Box component="section" aria-label="Scheduled tasks" sx={{ mt: 2 }}>
-    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Recurring tasks have no category. Due days automatically add a fresh occurrence to Tasks of the day. Completion and removal affect today only.</Typography>
+    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Recurring tasks have no category. On due days, the bot offers them at 08:00 in the schedule timezone. Accept the morning offer to add them to Tasks of the day. Completion and removal affect today only.</Typography>
     <Button startIcon={<AddIcon />} disabled={disabled || creating} onClick={() => setCreating(true)}>Add scheduled task</Button>
     {creating && <Paper variant="outlined" sx={{ p: 2, my: 2 }}><ScheduledForm disabled={disabled} onSave={onSave} onCancel={() => setCreating(false)} /></Paper>}
     <Stack spacing={1} sx={{ mt: 2 }}>{visible.map((task) => <Paper key={task.id} variant="outlined" sx={{ p: 2 }}>

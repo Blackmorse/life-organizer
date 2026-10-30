@@ -144,7 +144,10 @@ async fn finalizing_sends_only_current_owned_picks_to_verified_telegram_user() {
     assert_eq!(deliveries[0].0, support::TELEGRAM_ID);
     assert_eq!(
         deliveries[0].1.concat(),
-        "<b>Tasks for today are ready!</b>\n\n<b>🔹 Build</b>\n\u{a0}\u{a0}\u{a0}\u{a0}✅ Release 🚀\n\n"
+        format!(
+            "<b>Tasks for today are ready!</b>\n\n<b>📁 Work &lt;&amp;&gt;</b>\n<b>{indent}📋 Build</b>\n{indent}{indent}✅ Release 🚀\n{indent}{indent}🔹 Design\n\n",
+            indent = "\u{a0}".repeat(4)
+        )
     );
     assert_eq!(request(&app, "GET", "/daily-tasks", None).await.1, picks);
     assert!(!db.task_service().get(task.id).await.unwrap().completed);
@@ -301,14 +304,25 @@ async fn daily_picks_are_scoped_persistent_and_follow_subtask_identity() {
         StatusCode::BAD_REQUEST
     );
     let whole = json!({"task_id":task.id,"timezone":"Europe/Berlin"});
+    let all = request(&app, "POST", "/daily-tasks", Some(whole.clone()))
+        .await
+        .1;
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert!(
+        all.as_array()
+            .unwrap()
+            .iter()
+            .all(|pick| !pick["subtask_id"].as_str().unwrap().is_empty())
+    );
+    let saved_all = db.task_service().get(task.id).await.unwrap();
+    assert!(saved_all.subtasks.iter().all(|step| step.id.is_some()));
+    assert!(saved_all.subtasks[0].completed);
+    assert!(!saved_all.subtasks[1].completed);
     assert_eq!(
         request(&app, "POST", "/daily-tasks", Some(whole.clone()))
             .await
-            .1
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+            .1,
+        all
     );
     let removal = json!({"task_id":task.id,"subtask_id":""});
     request_as(
@@ -332,8 +346,16 @@ async fn daily_picks_are_scoped_persistent_and_follow_subtask_identity() {
         request(&app, "DELETE", "/daily-tasks", Some(removal))
             .await
             .1,
-        picks
+        json!([])
     );
+    // Individual selection/removal remains independent after bulk removal.
+    request(
+        &app,
+        "POST",
+        "/daily-tasks",
+        Some(json!({"task_id":task.id,"subtask_index":0,"timezone":"UTC"})),
+    )
+    .await;
     db.task_service()
         .replace_subtasks(task.id, &[saved.subtasks[1].clone()])
         .await

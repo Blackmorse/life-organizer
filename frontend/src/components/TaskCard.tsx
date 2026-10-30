@@ -36,7 +36,7 @@ export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onRep
         {task.subtasks.length > 0 && <Typography component="span" variant="caption" color="text.secondary">{task.subtasks.filter((step) => step.completed).length}/{task.subtasks.length} steps</Typography>}
         <Typography component="span" variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>#{task.id}</Typography>
       </ButtonBase>
-      {!task.completed && <DailyPickButton taskId={task.id} label={task.description} disabled={disabled} />}
+      {!task.completed && <DailyPickButton taskId={task.id} steps={task.subtasks} label={task.description} disabled={disabled} />}
       </Stack>
       <Box id={`task-${task.id}-details`} hidden={!expanded} sx={{ display: expanded ? 'block' : 'none', ml: { xs: 0, sm: 3 }, mb: 1 }}>
         <Paper variant="outlined" sx={{ p: 2 }}>

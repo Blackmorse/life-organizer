@@ -117,7 +117,7 @@ impl ScheduledDao for PgScheduledDao {
     }
     async fn daily(&self) -> Result<Vec<ScheduledOccurrence>, DaoError> {
         generate_scheduled(&self.pool, Some(self.user_id)).await?;
-        let rows = sqlx::query_as::<_, OccurrenceRow>("SELECT o.id, o.scheduled_task_id, o.description, o.subtasks, o.completed, (extract(epoch FROM o.expires_at)*1000)::bigint AS expires_at FROM scheduled_occurrences o JOIN scheduled_tasks s ON s.id=o.scheduled_task_id WHERE s.user_id=$1 AND NOT o.hidden AND o.expires_at > statement_timestamp() ORDER BY o.id")
+        let rows = sqlx::query_as::<_, OccurrenceRow>("SELECT o.id, o.scheduled_task_id, o.description, o.subtasks, o.completed, (extract(epoch FROM o.expires_at)*1000)::bigint AS expires_at FROM scheduled_occurrences o JOIN scheduled_tasks s ON s.id=o.scheduled_task_id WHERE s.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp() ORDER BY o.id")
             .bind(self.user_id).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|r| {
@@ -139,7 +139,7 @@ impl ScheduledDao for PgScheduledDao {
         steps: Option<&[Subtask]>,
     ) -> Result<bool, DaoError> {
         let mut tx = self.pool.begin().await?;
-        let current: Option<Json<Vec<Subtask>>> = sqlx::query_scalar("SELECT o.subtasks FROM scheduled_occurrences o JOIN scheduled_tasks s ON s.id=o.scheduled_task_id WHERE o.id=$1 AND s.user_id=$2 AND NOT o.hidden AND o.expires_at > statement_timestamp() FOR UPDATE OF o")
+        let current: Option<Json<Vec<Subtask>>> = sqlx::query_scalar("SELECT o.subtasks FROM scheduled_occurrences o JOIN scheduled_tasks s ON s.id=o.scheduled_task_id WHERE o.id=$1 AND s.user_id=$2 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp() FOR UPDATE OF o")
             .bind(id).bind(self.user_id).fetch_optional(&mut *tx).await?;
         let Some(current) = current else {
             return Ok(false);
@@ -156,7 +156,7 @@ impl ScheduledDao for PgScheduledDao {
         Ok(true)
     }
     async fn dismiss(&self, id: i64) -> Result<bool, DaoError> {
-        Ok(sqlx::query("UPDATE scheduled_occurrences o SET hidden=true FROM scheduled_tasks s WHERE o.id=$1 AND s.id=o.scheduled_task_id AND s.user_id=$2 AND o.expires_at > statement_timestamp()")
+        Ok(sqlx::query("UPDATE scheduled_occurrences o SET hidden=true FROM scheduled_tasks s WHERE o.id=$1 AND s.id=o.scheduled_task_id AND s.user_id=$2 AND o.selected AND o.expires_at > statement_timestamp()")
             .bind(id).bind(self.user_id).execute(&self.pool).await?.rows_affected() > 0)
     }
 }

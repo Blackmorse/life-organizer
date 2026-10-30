@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod bot_commands;
 pub mod config;
 pub mod dao;
 pub mod db;

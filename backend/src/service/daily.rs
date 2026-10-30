@@ -12,14 +12,22 @@ impl DailyService {
         recipient: i64,
         sender: &dyn MessageSender,
     ) -> Result<(), ServiceError> {
-        let items = self.dao.summary().await?;
-        if items.is_empty() {
+        let messages = self.current_messages().await?;
+        if messages.is_empty() {
             return Err(ServiceError::InvalidInput(
                 "Add tasks or subtasks to Tasks of the day before finalizing.",
             ));
         }
-        sender.send(recipient, &daily_messages(&items)).await?;
+        sender.send(recipient, &messages).await?;
         Ok(())
+    }
+    pub async fn current_messages(&self) -> Result<Vec<String>, ServiceError> {
+        let items = self.dao.summary().await?;
+        Ok(if items.is_empty() {
+            Vec::new()
+        } else {
+            daily_messages(&items)
+        })
     }
     pub fn new(dao: Arc<dyn DailyDao>) -> Self {
         Self { dao }

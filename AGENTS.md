@@ -51,8 +51,8 @@ Category and task CRUD are available through DAO, service, and HTTP API layers.
 Users have surrogate IDs and unique Telegram IDs; each category belongs to one
 user, and tasks inherit ownership from their category. The API verifies signed
 Telegram Mini App `initData` and scopes every operation to that user.
-Each ordinary task belongs to exactly one category. Each task can contain an ordered
-subtask list,
+Each ordinary task belongs to exactly one category and has urgency (Someday, Upcoming,
+or Soon), defaulting to Someday. Each task can contain an ordered subtask list,
 with completion flags and atomic list replacement through a user-scoped API.
 Saving a nonempty fully completed subtask list automatically completes the parent.
 Completion archives tasks;
@@ -63,8 +63,8 @@ container per test. Backend-specific architecture, API contract, testing rules,
 and build/run/test commands live in `backend/AGENTS.md`.
 
 `frontend/` is a React/TypeScript/Vite app using Material UI, with a read-first,
-searchable category/task hierarchy, CRUD, task reassignment, and ordered subtask
-editing/reordering with completion checkboxes
+searchable category/task hierarchy, CRUD, task reassignment, and urgency
+selection/badges, and ordered subtask editing/reordering with completion checkboxes
 and progress counts in task details. Active
 and Archive tabs separate unfinished and completed tasks; archive details allow
 only restoration. It uses a
@@ -80,7 +80,10 @@ Outbound Telegram bot messaging is implemented for daily-list finalization,
 using a shared reqwest client inside the backend. A background worker preserves
 unfinished expired picks, offers them at 08:00 in their saved device timezone,
 and polls Telegram Yes/No callbacks. PostgreSQL stores offers and polling progress;
-an advisory lock selects one worker. Subcategories and implementation
+private-chat `/today` resends the current daily list, while `/start` and `/help`
+explain commands. The worker registers Telegram command suggestions at startup
+and polls messages alongside callbacks. Commands reuse user-scoped daily logic.
+An advisory lock selects one worker. Subcategories and implementation
 plans are not implemented yet.
 
 Scheduled tasks live in separate user-owned `scheduled_tasks` and
@@ -88,18 +91,32 @@ Scheduled tasks live in separate user-owned `scheduled_tasks` and
 optional ordered subtasks, and a required weekly schedule (one or more
 weekdays; all seven means daily). Saved device timezone determines planning days,
 which run from local 02:00 to the next local 02:00. A background sweep and lazy
-API generation create today's due occurrences idempotently, including after
-downtime, without backfilling missed days. Each occurrence starts unchecked;
+API generation create today's due candidates idempotently, including after
+downtime, without backfilling missed days. At local 08:00 the bot offers them
+alongside ordinary carryover (or on their own). Yes adds them to the daily list;
+No leaves them out. Each accepted occurrence starts unchecked;
 completion and removal affect today only. Schedule edits affect future snapshots;
-deleting a schedule deletes its occurrences. Current occurrences join daily-list
-Telegram summaries, but do not create morning carryover offers.
+deleting a schedule deletes its occurrences. Only accepted occurrences join daily-list
+Telegram summaries. Scheduled work is offered fresh on due days, never carried
+over from an expired occurrence.
+
+Bot messages linking into a specific Mini App category/task were discussed as
+a possible next feature. Destination links and launch-destination handling are
+not implemented; no deep-link format has been adopted yet. Backend would send
+the destination, frontend would expand/focus it, and existing user ownership
+checks would still apply. See the subproject guides for integration options.
 
 ## Guidance for future changes
 
 Tasks of the day are implemented: users select whole active tasks or individual
 subtasks with calendar buttons, then track completion in a dedicated tab.
 Selections persist in PostgreSQL and expire at the next 02:00 in the device's
-IANA timezone supplied when adding each pick. Expiry removes selections only;
+IANA timezone supplied when adding each pick. Adding a task with subtasks selects
+all its current steps instead of the parent, preserving completion flags; tasks
+without steps remain whole-task picks. The parent calendar removes all its picks
+when fully selected. Bot lists group work under 📁 categories with nested tasks
+and subtasks; category-free scheduled work uses a 🔁 Scheduled section.
+Expiry removes selections only;
 original work and progress remain. Selected subtasks receive stable, task-owned
 IDs so edits and reordering preserve their daily links.
 The daily tab's Finalize tasks button sends the current server-resolved list to

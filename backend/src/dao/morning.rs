@@ -1,6 +1,8 @@
 use crate::domain::DailyTaskSummary;
 use sqlx::PgPool;
 
+type MorningSummaryRow = (i64, String, String, Option<String>, i64, Option<i64>);
+
 pub struct MorningStore {
     pool: PgPool,
 }
@@ -27,6 +29,9 @@ impl MorningStore {
         sqlx::query("DELETE FROM daily_tasks WHERE expires_at <= statement_timestamp()")
             .execute(&self.pool)
             .await?;
+        sqlx::query("SELECT prepare_scheduled_morning_offers(statement_timestamp())")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("UPDATE morning_offers SET state = 'expired' WHERE state IN ('pending', 'sent') AND valid_until <= statement_timestamp()")
             .execute(&self.pool).await?;
         Ok(())
@@ -46,25 +51,37 @@ impl MorningStore {
         let Some((id, recipient)) = row else {
             return Ok(None);
         };
-        let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT t.id, c.description, t.description, s.step->>'description'
+        let rows: Vec<MorningSummaryRow> = sqlx::query_as(
+            "SELECT t.id, c.description, t.description, s.step->>'description', COALESCE(s.position, 0), c.id
              FROM morning_offer_items i JOIN morning_offers o ON o.id = i.offer_id
              JOIN tasks t ON t.id = i.task_id JOIN categories c ON c.id = t.category_id
              LEFT JOIN LATERAL (SELECT step, position FROM jsonb_array_elements(t.subtasks)
                  WITH ORDINALITY AS steps(step, position) WHERE step->>'id' = i.subtask_id) s ON true
              WHERE i.offer_id = $1 AND c.user_id = o.user_id AND NOT t.completed
                  AND (i.subtask_id = '' OR (s.step IS NOT NULL AND NOT (s.step->>'completed')::boolean))
-             ORDER BY t.id, COALESCE(s.position, 0)")
+              UNION ALL
+              SELECT -o.id, '', o.description, step.value->>'description', COALESCE(step.position, 0), NULL::bigint
+              FROM morning_offer_scheduled_items i JOIN morning_offers m ON m.id = i.offer_id
+              JOIN scheduled_occurrences o ON o.id = i.occurrence_id
+              JOIN scheduled_tasks s ON s.id = o.scheduled_task_id
+              LEFT JOIN LATERAL jsonb_array_elements(o.subtasks) WITH ORDINALITY AS step(value, position) ON true
+              WHERE i.offer_id = $1 AND s.user_id = m.user_id
+                  AND NOT o.selected AND NOT o.hidden AND NOT o.completed
+                  AND o.expires_at > statement_timestamp()
+              ORDER BY 1, 5")
             .bind(id).fetch_all(&self.pool).await?;
         let items = rows
             .into_iter()
-            .map(|(task_id, category, task, subtask)| DailyTaskSummary {
-                task_id,
-                category,
-                task,
-                subtask,
-                completed: false,
-            })
+            .map(
+                |(task_id, category, task, subtask, _, category_id)| DailyTaskSummary {
+                    task_id,
+                    category_id,
+                    category,
+                    task,
+                    subtask,
+                    completed: false,
+                },
+            )
             .collect();
         Ok(Some(MorningOffer {
             id,
@@ -113,6 +130,19 @@ impl MorningStore {
                  ON CONFLICT(task_id, subtask_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, timezone = EXCLUDED.timezone
                  WHERE daily_tasks.expires_at <= statement_timestamp()")
                 .bind(id).bind(user_id).bind(timezone).execute(&mut *tx).await?.rows_affected();
+            count += sqlx::query(
+                "UPDATE scheduled_occurrences o SET selected = true
+                 FROM morning_offer_scheduled_items i, scheduled_tasks s
+                 WHERE i.offer_id = $1 AND i.occurrence_id = o.id
+                     AND s.id = o.scheduled_task_id AND s.user_id = $2
+                     AND NOT o.selected AND NOT o.hidden AND NOT o.completed
+                     AND o.expires_at > statement_timestamp()",
+            )
+            .bind(id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
         }
         sqlx::query("UPDATE morning_offers SET state = $2 WHERE id = $1")
             .bind(id)

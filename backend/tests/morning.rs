@@ -2,13 +2,14 @@ mod support;
 
 use async_trait::async_trait;
 use backend::{
+    bot_commands::BotMessage,
     dao::{
         CategoryDao, DailyDao, PgDailyDao, TaskDao,
         morning::{Decision, MorningStore},
     },
     domain::{Subtask, TaskUrgency},
     morning::{BotCallback, BotUpdate, MorningBot, MorningWorker},
-    service::NotificationError,
+    service::{MessageSender, NotificationError},
 };
 use std::sync::{Arc, Mutex};
 use support::{TELEGRAM_ID, TestDb};
@@ -89,13 +90,16 @@ async fn expiry_preserves_unfinished_picks_even_with_lazy_cleanup_and_new_select
     for step in [None, Some(0), Some(1)] {
         picks.select(id, step, "Asia/Kathmandu").await.unwrap();
     }
+    // Existing whole-task picks from before subtask expansion still carry over.
+    sqlx::query("INSERT INTO daily_tasks(task_id, subtask_id, expires_at, timezone) VALUES ($1, '', daily_reset_at('Asia/Kathmandu', statement_timestamp()), 'Asia/Kathmandu')")
+        .bind(id).execute(&db.pool).await.unwrap();
     picks.select(done, None, "Asia/Kathmandu").await.unwrap();
     db.tasks().set_completed(done, true).await.unwrap();
     expire(&db).await;
     // Upsert before the sweep must capture the old whole-task selection too.
     picks.select(id, None, "Asia/Kathmandu").await.unwrap();
     let active = picks.list().await.unwrap();
-    assert_eq!(active.len(), 1);
+    assert_eq!(active.len(), 2);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_items")
         .fetch_one(&db.pool)
         .await
@@ -161,7 +165,7 @@ async fn yes_revalidates_live_work_preserves_new_picks_and_is_user_scoped_and_id
     steps.swap(0, 1);
     db.tasks().replace_subtasks(id, &steps).await.unwrap();
     // A pick already added today must keep its own expiry/timezone.
-    picks.select(id, None, "Europe/London").await.unwrap();
+    picks.select(id, Some(1), "Europe/London").await.unwrap();
     let existing = picks.list().await.unwrap()[0].expires_at;
     assert_eq!(
         store.decide(offer, TELEGRAM_ID, true).await.unwrap(),
@@ -172,7 +176,7 @@ async fn yes_revalidates_live_work_preserves_new_picks_and_is_user_scoped_and_id
     assert_eq!(
         active
             .iter()
-            .find(|pick| pick.subtask_id.is_empty())
+            .find(|pick| pick.subtask_id == *steps[1].id.as_ref().unwrap())
             .unwrap()
             .expires_at,
         existing
@@ -180,7 +184,7 @@ async fn yes_revalidates_live_work_preserves_new_picks_and_is_user_scoped_and_id
     assert_eq!(
         active
             .iter()
-            .find(|pick| !pick.subtask_id.is_empty())
+            .find(|pick| pick.subtask_id == *steps[0].id.as_ref().unwrap())
             .unwrap()
             .subtask_id,
         steps[0].id.as_ref().unwrap().as_str()
@@ -243,6 +247,7 @@ async fn no_and_expired_offers_never_add_work_and_old_backlogs_do_not_prompt() {
 
 #[derive(Default)]
 struct FakeBot {
+    messages: Mutex<Vec<(i64, Vec<String>)>>,
     offers: Mutex<Vec<(i64, i64, Vec<String>)>>,
     updates: Mutex<Vec<BotUpdate>>,
     offsets: Mutex<Vec<i64>>,
@@ -250,7 +255,24 @@ struct FakeBot {
     fail: Mutex<bool>,
 }
 #[async_trait]
+impl MessageSender for FakeBot {
+    async fn send(&self, recipient: i64, messages: &[String]) -> Result<(), NotificationError> {
+        self.messages
+            .lock()
+            .unwrap()
+            .push((recipient, messages.to_vec()));
+        if *self.fail.lock().unwrap() {
+            Err(NotificationError::DeliveryFailed)
+        } else {
+            Ok(())
+        }
+    }
+}
+#[async_trait]
 impl MorningBot for FakeBot {
+    async fn configure_commands(&self) -> Result<(), NotificationError> {
+        Ok(())
+    }
     async fn offer(&self, user: i64, id: i64, text: &[String]) -> Result<(), NotificationError> {
         self.offers.lock().unwrap().push((user, id, text.to_vec()));
         if *self.fail.lock().unwrap() {
@@ -296,7 +318,7 @@ async fn worker_retries_durably_and_callbacks_require_owner_private_chat_and_per
         let messages = bot.offers.lock().unwrap();
         assert_eq!(messages.len(), 2);
         assert!(messages[1].2.concat().contains("Build &lt;&amp;&gt;"));
-        assert!(messages[1].2.concat().contains("Add this unfinished work"));
+        assert!(messages[1].2.concat().contains("Add these tasks"));
     }
     for (index, sender, chat) in [
         (1, TELEGRAM_ID + 1, TELEGRAM_ID + 1),
@@ -305,6 +327,7 @@ async fn worker_retries_durably_and_callbacks_require_owner_private_chat_and_per
     ] {
         bot.updates.lock().unwrap().push(BotUpdate {
             id: index,
+            message: None,
             callback: Some(BotCallback {
                 id: index.to_string(),
                 sender,
@@ -324,4 +347,415 @@ async fn worker_retries_durably_and_callbacks_require_owner_private_chat_and_per
         .await
         .unwrap();
     assert_eq!(*bot.offsets.lock().unwrap().last().unwrap(), 4);
+}
+
+fn command(id: i64, sender: i64, private_chat: Option<i64>, text: &str) -> BotUpdate {
+    BotUpdate {
+        id,
+        callback: None,
+        message: Some(BotMessage {
+            sender,
+            private_chat,
+            text: text.into(),
+        }),
+    }
+}
+
+#[tokio::test]
+async fn today_command_resolves_live_owned_daily_work_and_accepted_schedules_without_changing_picks()
+ {
+    use backend::dao::{PgCategoryDao, PgTaskDao, PgUserDao};
+    let db = TestDb::new().await;
+    let id = task(&db, "Build <app>").await;
+    db.tasks()
+        .replace_subtasks(
+            id,
+            &[
+                Subtask {
+                    completed: true,
+                    ..Subtask::new("Design")
+                },
+                Subtask::new("Ship & verify"),
+            ],
+        )
+        .await
+        .unwrap();
+    daily(&db).select(id, None, "UTC").await.unwrap();
+    let expired = task(&db, "Expired pick").await;
+    daily(&db).select(expired, None, "UTC").await.unwrap();
+    sqlx::query("UPDATE daily_tasks SET expires_at = statement_timestamp() - interval '1 second' WHERE task_id=$1")
+        .bind(expired).execute(&db.pool).await.unwrap();
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(TELEGRAM_ID + 1)
+        .await
+        .unwrap();
+    let category = PgCategoryDao::new(db.pool.clone(), other.id)
+        .create("Private category")
+        .await
+        .unwrap();
+    let other_task = PgTaskDao::new(db.pool.clone(), other.id)
+        .create(category.id, "Other user's task", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    PgDailyDao::new(db.pool.clone(), other.id)
+        .select(other_task.id, None, "UTC")
+        .await
+        .unwrap();
+    let accepted = schedule(&db, "Accepted exercise").await;
+    schedule(&db, "Unaccepted exercise").await;
+    backend::dao::generate_scheduled(&db.pool, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scheduled_occurrences SET selected=true WHERE scheduled_task_id=$1")
+        .bind(accepted)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let picks_before = serde_json::to_value(daily(&db).list().await.unwrap()).unwrap();
+    let summary_before = daily(&db).summary().await.unwrap();
+    let bot = Arc::new(FakeBot::default());
+    bot.updates
+        .lock()
+        .unwrap()
+        .push(command(1, TELEGRAM_ID, Some(TELEGRAM_ID), "/today"));
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    worker.poll().await.unwrap();
+    {
+        let sent = bot.messages.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, TELEGRAM_ID);
+        let text = sent[0].1.concat();
+        for expected in [
+            "📁 Work",
+            "Build &lt;app&gt;",
+            "✅ Design",
+            "🔹 Ship &amp; verify",
+            "🔁 Scheduled",
+            "Accepted exercise",
+            "First step",
+        ] {
+            assert!(text.contains(expected), "missing {expected}");
+        }
+        for excluded in [
+            "Expired pick",
+            "Other user's task",
+            "Private category",
+            "Unaccepted exercise",
+        ] {
+            assert!(!text.contains(excluded));
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(daily(&db).list().await.unwrap()).unwrap(),
+        picks_before
+    );
+    assert_eq!(daily(&db).summary().await.unwrap(), summary_before);
+    let mut steps = db.tasks().get(id).await.unwrap().unwrap().subtasks;
+    steps[1].description = "Release now".into();
+    db.tasks().replace_subtasks(id, &steps).await.unwrap();
+    bot.updates.lock().unwrap().extend([
+        command(2, TELEGRAM_ID, Some(TELEGRAM_ID), "/today"),
+        command(3, other.telegram_id, Some(other.telegram_id), "/today"),
+    ]);
+    worker.poll().await.unwrap();
+    let sent = bot.messages.lock().unwrap();
+    assert!(sent[1].1.concat().contains("Release now"));
+    assert!(!sent[1].1.concat().contains("Ship &amp; verify"));
+    assert_eq!(sent[2].0, other.telegram_id);
+    assert!(sent[2].1.concat().contains("Other user's task"));
+    assert!(!sent[2].1.concat().contains("Build"));
+}
+
+#[tokio::test]
+async fn commands_help_new_users_and_ignore_nonprivate_mismatched_and_unrelated_messages() {
+    let db = TestDb::new().await;
+    let bot = Arc::new(FakeBot::default());
+    let new_user = TELEGRAM_ID + 1;
+    bot.updates.lock().unwrap().extend([
+        command(1, new_user, Some(new_user), "/today"),
+        command(2, new_user, Some(new_user), "/start"),
+        command(3, new_user, Some(new_user), "/help"),
+        command(4, TELEGRAM_ID, None, "/today"),
+        command(5, TELEGRAM_ID, Some(new_user), "/today"),
+        command(6, TELEGRAM_ID, Some(TELEGRAM_ID), "hello"),
+        command(7, TELEGRAM_ID, Some(TELEGRAM_ID), "/today_other"),
+        command(8, TELEGRAM_ID, Some(TELEGRAM_ID), "/today@another_bot"),
+        command(9, 0, Some(0), "/today"),
+    ]);
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    worker.poll().await.unwrap();
+    assert_eq!(
+        MorningStore::new(db.pool.clone()).offset().await.unwrap(),
+        10
+    );
+    let sent = bot.messages.lock().unwrap();
+    assert_eq!(sent.len(), 3);
+    assert!(sent.iter().all(|(recipient, _)| *recipient == new_user));
+    assert!(
+        sent[0]
+            .1
+            .concat()
+            .starts_with("No tasks in Tasks of the day yet.")
+    );
+    assert!(sent[1].1.concat().contains("Use /today"));
+    assert_eq!(sent[1], sent[2]);
+}
+
+#[tokio::test]
+async fn failed_command_delivery_does_not_replay_or_block_callbacks() {
+    let db = TestDb::new().await;
+    let bot = Arc::new(FakeBot::default());
+    *bot.fail.lock().unwrap() = true;
+    bot.updates.lock().unwrap().extend([
+        command(1, TELEGRAM_ID, Some(TELEGRAM_ID), "/today"),
+        BotUpdate {
+            id: 2,
+            message: None,
+            callback: Some(BotCallback {
+                id: "cb".into(),
+                sender: TELEGRAM_ID,
+                private_chat: Some(TELEGRAM_ID),
+                data: "morning:123:yes".into(),
+            }),
+        },
+    ]);
+    MorningWorker::new(db.pool.clone(), bot.clone())
+        .poll()
+        .await
+        .unwrap();
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    assert_eq!(bot.answers.lock().unwrap().len(), 1);
+    MorningWorker::new(db.pool.clone(), bot.clone())
+        .poll()
+        .await
+        .unwrap();
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    assert_eq!(*bot.offsets.lock().unwrap(), vec![0, 3]);
+}
+
+async fn schedule(db: &TestDb, description: &str) -> i64 {
+    use backend::{
+        dao::{PgScheduledDao, ScheduledDao},
+        domain::ScheduledTaskInput,
+    };
+    PgScheduledDao::new(db.pool.clone(), db.user.id)
+        .save(
+            None,
+            &ScheduledTaskInput {
+                description: description.into(),
+                weekdays: vec![1, 2, 3, 4, 5, 6, 7],
+                timezone: "UTC".into(),
+                subtasks: vec![Subtask::new("First step")],
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn scheduled_only_mornings_offer_without_selecting_and_yes_selects_once() {
+    use backend::dao::{PgScheduledDao, ScheduledDao};
+    let db = TestDb::new().await;
+    let template = schedule(&db, "Exercise <&>").await;
+    let scheduled = PgScheduledDao::new(db.pool.clone(), db.user.id);
+    assert!(scheduled.daily().await.unwrap().is_empty());
+    assert!(daily(&db).summary().await.unwrap().is_empty());
+    let occurrence: i64 = sqlx::query_scalar("SELECT id FROM scheduled_occurrences")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        !scheduled
+            .progress(occurrence, Some(true), None)
+            .await
+            .unwrap()
+    );
+    assert!(!scheduled.dismiss(occurrence).await.unwrap());
+
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let correct: bool = sqlx::query_scalar("SELECT (due_at AT TIME ZONE timezone)::time = time '08:00' AND (valid_until AT TIME ZONE timezone)::time = time '02:00' FROM morning_offers")
+        .fetch_one(&db.pool).await.unwrap();
+    assert!(correct);
+    sqlx::query("UPDATE morning_offers SET due_at = statement_timestamp() + interval '1 hour'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(store.claim().await.unwrap().is_none());
+    let id = due(&db).await;
+    let bot = Arc::new(FakeBot::default());
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    worker.deliver_due().await.unwrap();
+    worker.deliver_due().await.unwrap();
+    {
+        let messages = bot.offers.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, TELEGRAM_ID);
+        assert!(messages[0].2.concat().contains("Exercise &lt;&amp;&gt;"));
+    }
+    assert!(scheduled.daily().await.unwrap().is_empty());
+    assert_eq!(
+        store.decide(id, TELEGRAM_ID + 1, true).await.unwrap(),
+        Decision::Unavailable
+    );
+    assert_eq!(
+        store.decide(id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(1)
+    );
+    let picks = scheduled.daily().await.unwrap();
+    assert_eq!(picks.len(), 1);
+    assert_eq!(picks[0].scheduled_task_id, template);
+    assert!(!picks[0].completed);
+    assert!(!picks[0].subtasks[0].completed);
+    assert_eq!(daily(&db).summary().await.unwrap().len(), 1);
+    assert_eq!(
+        store.decide(id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Unavailable
+    );
+    scheduled.dismiss(occurrence).await.unwrap();
+    worker.deliver_due().await.unwrap();
+    assert!(scheduled.daily().await.unwrap().is_empty());
+    assert_eq!(bot.offers.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn scheduled_and_carryover_share_offer_and_no_keeps_both_out_of_daily_list() {
+    use backend::dao::{PgScheduledDao, ScheduledDao};
+    let db = TestDb::new().await;
+    let ordinary = task(&db, "Carry me").await;
+    daily(&db).select(ordinary, None, "UTC").await.unwrap();
+    // Expire at today's real reset so ordinary and scheduled work share a group.
+    sqlx::query("UPDATE daily_tasks SET expires_at = ((daily_reset_at('UTC', statement_timestamp()) AT TIME ZONE 'UTC')::date - 1 + time '02:00') AT TIME ZONE 'UTC'")
+        .execute(&db.pool).await.unwrap();
+    schedule(&db, "Scheduled").await;
+    backend::dao::generate_scheduled(&db.pool, None)
+        .await
+        .unwrap();
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let id = due(&db).await;
+    let offer = store.claim().await.unwrap().unwrap();
+    assert_eq!(offer.items.len(), 2);
+    assert!(offer.items.iter().any(|i| i.task == "Carry me"));
+    assert!(offer.items.iter().any(|i| i.task == "Scheduled"));
+    assert_ne!(offer.items[0].task_id, offer.items[1].task_id);
+    assert_eq!(
+        store.decide(id, TELEGRAM_ID, false).await.unwrap(),
+        Decision::Declined
+    );
+    store.sweep().await.unwrap();
+    assert!(store.claim().await.unwrap().is_none());
+    assert!(daily(&db).list().await.unwrap().is_empty());
+    assert!(
+        PgScheduledDao::new(db.pool.clone(), db.user.id)
+            .daily()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn scheduled_acceptance_filters_deleted_hidden_expired_and_unoffered_work() {
+    use backend::dao::{PgScheduledDao, ScheduledDao};
+    let db = TestDb::new().await;
+    for name in ["Keep", "Deleted", "Hidden", "Expired"] {
+        schedule(&db, name).await;
+    }
+    backend::dao::generate_scheduled(&db.pool, None)
+        .await
+        .unwrap();
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let id = due(&db).await;
+    let offer = store.claim().await.unwrap().unwrap();
+    assert_eq!(offer.items.len(), 4);
+    store.sent(id).await.unwrap();
+    sqlx::query("DELETE FROM scheduled_tasks WHERE description = 'Deleted'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scheduled_occurrences SET hidden = true WHERE description = 'Hidden'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE scheduled_occurrences SET expires_at = statement_timestamp() - interval '1 second' WHERE description = 'Expired'")
+        .execute(&db.pool).await.unwrap();
+    schedule(&db, "Created after offer").await;
+    backend::dao::generate_scheduled(&db.pool, None)
+        .await
+        .unwrap();
+    store.sweep().await.unwrap();
+    assert_eq!(
+        store.decide(id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(1)
+    );
+    let items = PgScheduledDao::new(db.pool.clone(), db.user.id)
+        .daily()
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].description, "Keep");
+}
+
+#[tokio::test]
+async fn scheduled_offers_follow_due_weekdays_dst_and_snapshot_timezone_without_backfill() {
+    let db = TestDb::new().await;
+    let id = schedule(&db, "Sunday exercise").await;
+    sqlx::query("UPDATE scheduled_tasks SET weekdays=ARRAY[7]::smallint[], timezone='Europe/Berlin', created_at='2026-01-01Z' WHERE id=$1")
+        .bind(id).execute(&db.pool).await.unwrap();
+    // Missing local 02:00 becomes 03:00 on spring-forward Sunday.
+    for instant in ["2026-03-29T00:59:00Z", "2026-03-29T01:00:00Z"] {
+        sqlx::query("SELECT generate_scheduled_occurrences($1, $2::text::timestamptz)")
+            .bind(db.user.id)
+            .bind(instant)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT prepare_scheduled_morning_offers($1::text::timestamptz)")
+            .bind(instant)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let schedule: (String, String, String) = sqlx::query_as("SELECT to_char(reset_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), to_char(valid_until AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM morning_offers")
+        .fetch_one(&db.pool).await.unwrap();
+    assert_eq!(
+        schedule,
+        (
+            "2026-03-29 01:00".into(),
+            "2026-03-29 06:00".into(),
+            "2026-03-30 00:00".into()
+        )
+    );
+    sqlx::query("UPDATE scheduled_tasks SET timezone='Asia/Kathmandu'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT prepare_scheduled_morning_offers('2026-03-29T07:00:00Z')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let zones: Vec<String> = sqlx::query_scalar("SELECT timezone FROM morning_offers")
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(zones, vec!["Europe/Berlin"]);
+    // Monday is not due. Expired Sunday work must not produce another offer.
+    sqlx::query("SELECT generate_scheduled_occurrences($1, '2026-03-30T12:00:00Z')")
+        .bind(db.user.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT prepare_scheduled_morning_offers('2026-03-30T12:00:00Z')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
 }
