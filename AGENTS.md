@@ -89,6 +89,13 @@ and polls messages alongside callbacks. Commands reuse user-scoped daily logic.
 An advisory lock selects one worker. Subcategories and implementation
 plans are not implemented yet.
 
+Private-chat voice recordings are transcribed and echoed as text through a
+provider-neutral `SpeechRecognizer`. OpenAI is the initial provider, implemented
+as a custom `langchain-rust` Tool using `gpt-4o-mini-transcribe`; startup requires
+backend-only `OPENAI_KEY`. Telegram Ogg/Opus voice files stay in memory (20 MB
+maximum), and replies are HTML-escaped and split. Voice messages do not create
+tasks or persist transcripts. See the backend guide for integration details.
+
 After the 08:00 setup, the bot reminds users of unfinished ordinary tasks outside
 Tasks of the day, ordered Soon → Upcoming → Someday. A Yes/No offer waits for the
 user's decision; mornings without an actionable offer send the reminder directly.

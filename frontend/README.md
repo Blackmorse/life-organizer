@@ -137,7 +137,8 @@ PostgreSQL database:
 
 ```sh
 DATABASE_URL=postgres://user:password@localhost:5432/scheduler \
-TELEGRAM_BOT_TOKEN='<your BotFather token>' cargo run
+TELEGRAM_BOT_TOKEN='<your BotFather token>' \
+OPENAI_KEY='<your OpenAI API key>' cargo run
 ```
 
 Then, from `frontend/`:

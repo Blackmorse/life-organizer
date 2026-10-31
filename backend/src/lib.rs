@@ -1,10 +1,12 @@
 pub mod api;
 pub mod auth;
 pub mod bot_commands;
+pub mod bot_voice;
 pub mod config;
 pub mod dao;
 pub mod db;
 pub mod domain;
 pub mod morning;
 pub mod service;
+pub mod speech;
 pub mod telegram;

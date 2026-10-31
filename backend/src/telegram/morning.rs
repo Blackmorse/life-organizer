@@ -38,6 +38,7 @@ struct Message {
     chat: Chat,
     from: Option<Sender>,
     text: Option<String>,
+    voice: Option<crate::bot_voice::VoiceMessage>,
 }
 #[derive(Deserialize)]
 struct Chat {
@@ -47,7 +48,7 @@ struct Chat {
 }
 
 impl TelegramSender {
-    async fn call(
+    pub(super) async fn call(
         &self,
         method: &str,
         body: serde_json::Value,
@@ -85,6 +86,9 @@ impl TelegramSender {
 
 #[async_trait]
 impl MorningBot for TelegramSender {
+    async fn download_voice(&self, file_id: &str) -> Result<Vec<u8>, crate::speech::SpeechError> {
+        self.download_audio(file_id).await
+    }
     async fn configure_commands(&self) -> Result<(), NotificationError> {
         self.call_ok(
             "setMyCommands",
@@ -154,10 +158,14 @@ impl MorningBot for TelegramSender {
                 }),
                 message: update.message.and_then(|message| {
                     let from = message.from.filter(|from| !from.is_bot)?;
+                    if message.text.is_none() && message.voice.is_none() {
+                        return None;
+                    }
                     Some(BotMessage {
                         sender: from.id,
                         private_chat: (message.chat.kind == "private").then_some(message.chat.id),
-                        text: message.text?,
+                        text: message.text.unwrap_or_default(),
+                        voice: message.voice,
                     })
                 }),
             })

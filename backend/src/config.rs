@@ -3,6 +3,7 @@ use std::{env, net::SocketAddr};
 pub struct Config {
     pub database_url: String,
     pub telegram_bot_token: String,
+    pub openai_key: String,
     pub bind_address: SocketAddr,
 }
 
@@ -13,7 +14,12 @@ impl Config {
         if telegram_bot_token.trim().is_empty() {
             return Err("TELEGRAM_BOT_TOKEN must not be empty".into());
         }
+        let openai_key = env::var("OPENAI_KEY").map_err(|error| format!("OPENAI_KEY: {error}"))?;
+        if openai_key.trim().is_empty() {
+            return Err("OPENAI_KEY must not be empty".into());
+        }
         Ok(Self {
+            openai_key,
             telegram_bot_token,
             database_url: env::var("DATABASE_URL")
                 .map_err(|error| format!("DATABASE_URL: {error}"))?,

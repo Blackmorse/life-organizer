@@ -1,5 +1,6 @@
 //! Outbound Telegram transport. Never expose/log URLs: they contain the bot token.
 mod morning;
+mod voice;
 use crate::service::{MessageSender, NotificationError};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -198,7 +199,9 @@ mod tests {
                 {"update_id":4,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123,"is_bot":true},"text":"/today"}},
                 {"update_id":5,"message":{"chat":{"id":123,"type":"private"},"text":"/today"}},
                 {"update_id":6,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"photo":[]}},
-                {"update_id":7,"edited_message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"/today"}}
+                {"update_id":7,"edited_message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"text":"/today"}},
+                {"update_id":8,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123},"voice":{"file_id":"voice-id","file_size":42,"duration":2}}},
+                {"update_id":9,"message":{"chat":{"id":123,"type":"private"},"from":{"id":123,"is_bot":true},"voice":{"file_id":"ignored"}}}
             ]})),
         ]).await;
         bot.sender.configure_commands().await.unwrap();
@@ -210,7 +213,14 @@ mod tests {
         assert_eq!(updates[1].message.as_ref().unwrap().private_chat, None);
         assert_eq!(updates[2].message.as_ref().unwrap().sender, 456);
         assert_eq!(updates[2].message.as_ref().unwrap().private_chat, Some(123));
-        assert!(updates[3..].iter().all(|update| update.message.is_none()));
+        assert!(updates[3..7].iter().all(|update| update.message.is_none()));
+        let voice = updates[7].message.as_ref().unwrap();
+        assert_eq!(voice.sender, 123);
+        assert_eq!(voice.private_chat, Some(123));
+        assert!(voice.text.is_empty());
+        assert_eq!(voice.voice.as_ref().unwrap().file_id, "voice-id");
+        assert_eq!(voice.voice.as_ref().unwrap().file_size, Some(42));
+        assert!(updates[8].message.is_none());
         let requests = bot.state.requests.lock().unwrap();
         assert_eq!(
             requests[0],

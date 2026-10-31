@@ -357,6 +357,7 @@ fn command(id: i64, sender: i64, private_chat: Option<i64>, text: &str) -> BotUp
         id,
         callback: None,
         message: Some(BotMessage {
+            voice: None,
             sender,
             private_chat,
             text: text.into(),
@@ -534,6 +535,60 @@ async fn failed_command_delivery_does_not_replay_or_block_callbacks() {
         .unwrap();
     assert_eq!(bot.messages.lock().unwrap().len(), 1);
     assert_eq!(*bot.offsets.lock().unwrap(), vec![0, 3]);
+}
+
+#[tokio::test]
+async fn failed_voice_reply_advances_offset_and_does_not_block_callbacks() {
+    use backend::{
+        bot_voice::VoiceMessage,
+        speech::{SpeechError, SpeechRecognizer},
+    };
+    struct Recognizer;
+    #[async_trait]
+    impl SpeechRecognizer for Recognizer {
+        async fn transcribe(&self, _: Vec<u8>) -> Result<String, SpeechError> {
+            panic!("failed download must not invoke provider");
+        }
+    }
+    let db = TestDb::new().await;
+    let bot = Arc::new(FakeBot::default());
+    *bot.fail.lock().unwrap() = true;
+    let mut voice = command(1, TELEGRAM_ID, Some(TELEGRAM_ID), "");
+    voice.message.as_mut().unwrap().voice = Some(VoiceMessage {
+        file_id: "recording".into(),
+        file_size: None,
+    });
+    bot.updates.lock().unwrap().extend([
+        voice,
+        BotUpdate {
+            id: 2,
+            message: None,
+            callback: Some(BotCallback {
+                id: "after-voice".into(),
+                sender: TELEGRAM_ID,
+                private_chat: Some(TELEGRAM_ID),
+                data: "morning:123:yes".into(),
+            }),
+        },
+    ]);
+    MorningWorker::new(db.pool.clone(), bot.clone())
+        .with_speech(Arc::new(Recognizer))
+        .poll()
+        .await
+        .unwrap();
+    assert_eq!(
+        MorningStore::new(db.pool.clone()).offset().await.unwrap(),
+        3
+    );
+    assert_eq!(bot.answers.lock().unwrap().len(), 1);
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    MorningWorker::new(db.pool.clone(), bot.clone())
+        .with_speech(Arc::new(Recognizer))
+        .poll()
+        .await
+        .unwrap();
+    assert_eq!(*bot.offsets.lock().unwrap(), [0, 3]);
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
 }
 
 async fn schedule(db: &TestDb, description: &str) -> i64 {

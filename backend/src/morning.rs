@@ -7,6 +7,7 @@ use crate::{
         morning::{Decision, MorningStore},
     },
     service::{BacklogService, MessageSender, NotificationError, ServiceError, summary_messages},
+    speech::{SpeechError, SpeechRecognizer},
 };
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -27,6 +28,9 @@ pub struct BotCallback {
 
 #[async_trait]
 pub trait MorningBot: MessageSender {
+    async fn download_voice(&self, _file_id: &str) -> Result<Vec<u8>, SpeechError> {
+        Err(SpeechError::RecognitionFailed)
+    }
     async fn configure_commands(&self) -> Result<(), NotificationError>;
     async fn offer(
         &self,
@@ -43,6 +47,7 @@ pub struct MorningWorker {
     store: MorningStore,
     commands: BotCommands,
     bot: Arc<dyn MorningBot>,
+    speech: Option<Arc<dyn SpeechRecognizer>>,
     backlog_delivery: tokio::sync::Mutex<()>,
 }
 
@@ -53,8 +58,14 @@ impl MorningWorker {
             store: MorningStore::new(pool.clone()),
             commands: BotCommands::new(pool),
             bot,
+            speech: None,
             backlog_delivery: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub fn with_speech(mut self, speech: Arc<dyn SpeechRecognizer>) -> Self {
+        self.speech = Some(speech);
+        self
     }
 
     pub async fn deliver_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -134,7 +145,17 @@ impl MorningWorker {
                 // acknowledgement must not block later updates indefinitely.
                 let _ = self.bot.answer(&callback.id, text).await;
             }
+            if let Some(message) = update.message.as_ref()
+                && message.voice.is_some()
+                && let Some(speech) = &self.speech
+                && crate::bot_voice::handle(message, self.bot.as_ref(), speech.as_ref())
+                    .await
+                    .is_err()
+            {
+                eprintln!("Voice reply delivery failed; the user can send the recording again.");
+            }
             if let Some(message) = update.message
+                && message.voice.is_none()
                 && let Err(error) = self.commands.handle(&message, self.bot.as_ref()).await
             {
                 // Do not replay a possibly partially delivered summary or let
@@ -181,9 +202,10 @@ fn parse_choice(data: &str) -> Option<(i64, bool)> {
 pub async fn run(
     pool: PgPool,
     bot: Arc<dyn MorningBot>,
+    speech: Arc<dyn SpeechRecognizer>,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
-    let worker = MorningWorker::new(pool.clone(), bot);
+    let worker = MorningWorker::new(pool.clone(), bot).with_speech(speech);
     loop {
         if *stop.borrow() {
             return;

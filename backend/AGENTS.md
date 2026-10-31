@@ -25,6 +25,9 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   timezones, with independently completable daily occurrences and optional subtasks.
 - Telegram Mini App authentication verifies signed `initData` on every API request.
   Users are registered automatically; category/task operations are user-scoped.
+- Private-chat voice messages are transcribed through a provider-neutral
+  `SpeechRecognizer`, currently backed by a custom `langchain-rust` OpenAI tool.
+  The bot sends recognized text back; `OPENAI_KEY` is required at startup.
 - Daily-list finalization sends a summary to the verified user's private Telegram
   chat through the existing bot token, using reqwest with rustls. A background
   worker sends 08:00 rollover offers and polls Telegram messages and callback
@@ -42,6 +45,9 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/telegram/morning.rs` | Morning-offer buttons, command-menu registration, message/callback polling and acknowledgements. |
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
 | `src/bot_commands.rs` | Private-chat `/today`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
+| `src/bot_voice.rs` | Private-chat voice orchestration, transcription replies, escaping and splitting. |
+| `src/speech.rs`, `src/speech/openai.rs` | Provider-neutral speech boundary and custom LangChain OpenAI transcription tool. |
+| `src/telegram/voice.rs` | Telegram getFile resolution and bounded in-memory audio download. |
 | `src/dao/backlog.rs`, `src/service/backlog.rs` | Owned, urgency-ordered unfinished ordinary work outside today's picks. |
 | `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
 | `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
@@ -227,12 +233,35 @@ not block the bot. No additional token or chat-ID environment variable is needed
   without stopping typed commands; restarting retries menu setup.
 - Incoming Telegram sender identity determines the user and reply recipient.
   Only positive sender IDs matching a private chat ID are handled. Group chats,
-  mismatched identities, bot senders, non-text/edited messages, and unrelated text
+  mismatched identities, bot senders, unsupported/edited messages, and unrelated text
   are ignored. Bare commands are supported; addressed `@bot` forms are ignored.
 - Commands reuse `DailyService::current_messages` and the owned daily DAO.
   `/remind` reuses `BacklogService::current_messages` and the owned backlog DAO.
   Their update offset advances even on delivery failure to avoid blocking later
   callbacks or replaying partially sent summaries. Send `/today` again to retry.
+
+### Voice transcription
+
+Send a recorded voice message in the bot's private chat to receive its transcript
+in the original language. Only positive senders matching the private chat are
+handled; bot senders and edited messages are ignored. Telegram `voice` attachments
+are supported (Ogg/Opus), not arbitrary audio/document uploads.
+
+The adapter resolves `getFile` and downloads at most 20 MB, checking both metadata
+and actual bytes. Audio stays in memory and is sent to OpenAI's
+`/v1/audio/transcriptions` using `gpt-4o-mini-transcribe`. There is no task creation
+or transcript/audio database storage. Replies escape HTML and split at 4096 rendered
+UTF-16 units. Download/provider failures give a generic retry reply; update offsets
+advance even when replies fail, avoiding routine paid retranscription or blocking
+later callbacks. A crash before offset persistence can still replay an update.
+
+`SpeechRecognizer` isolates bot logic from provider choice. `langchain-rust` has no
+built-in STT tool (its speech2text example is TTS), so the OpenAI adapter implements
+and executes its `Tool` trait using an HTTP multipart transcription request.
+Version 4.6 supports the current Rust 1.89 toolchain; newer 7.x dependencies require
+Rust 1.90. Provider calls have a 90-second timeout, 5-second connect timeout, no
+redirects and no automatic retries. Polling processes voice messages sequentially.
+Audio, transcripts, provider response bodies, and credentials are not logged.
 
 ### Morning backlog reminders
 
@@ -473,7 +502,7 @@ ownership checks must apply when the frontend loads the destination.
 Run from `backend/`:
 
 ```sh
-DATABASE_URL=postgres://user:password@localhost:5432/scheduler TELEGRAM_BOT_TOKEN='<your BotFather token>' cargo run
+DATABASE_URL=postgres://user:password@localhost:5432/scheduler TELEGRAM_BOT_TOKEN='<your BotFather token>' OPENAI_KEY='<your OpenAI API key>' cargo run
 cargo build
 cargo check
 cargo test
@@ -482,7 +511,8 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 `TELEGRAM_BOT_TOKEN` is required and must belong to the bot launching this Mini App.
-Keep it backend-only; never use a `VITE_*` variable for it.
+`OPENAI_KEY` is required and nonblank; it authorizes voice transcription with OpenAI.
+Keep both credentials backend-only; never use `VITE_*` variables for them.
 `DATABASE_URL` is required for application startup and must point to an existing
 PostgreSQL database; the database user needs schema migration permissions.
 `BIND_ADDRESS` defaults to `127.0.0.1:3000`. Tests create their own databases and

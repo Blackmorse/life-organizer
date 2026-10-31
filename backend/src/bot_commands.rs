@@ -10,6 +10,7 @@ pub struct BotMessage {
     pub sender: i64,
     pub private_chat: Option<i64>,
     pub text: String,
+    pub voice: Option<crate::bot_voice::VoiceMessage>,
 }
 
 pub struct BotCommands {
@@ -51,7 +52,7 @@ impl BotCommands {
                 }
             }
             Some("/start" | "/help") => vec![
-                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Manage tasks and progress in the Mini App.".into(),
+                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Send a voice message to receive its recognized text. Manage tasks and progress in the Mini App.".into(),
             ],
             _ => return Ok(()),
         };
