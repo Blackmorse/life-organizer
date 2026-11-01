@@ -138,6 +138,12 @@ own tab and can be reopened. No separate event-time alert is sent.
 
 ## Guidance for future changes
 
+Alpine-based multi-stage Dockerfiles live in each subproject. Separate GitHub
+Actions workflows publish frontend/backend images to this repository's GHCR
+packages on pushes to `main` changing `frontend/**` or `backend/**`, respectively.
+Both images target `linux/amd64` and `linux/arm64`. The frontend nginx runtime
+proxies `/api` to the backend; container build/runtime usage is in `README.md`.
+
 Tasks of the day are implemented: users select whole active tasks or individual
 subtasks with calendar buttons, then track completion in a dedicated tab.
 Selections persist in PostgreSQL and expire at the next 02:00 in the device's
