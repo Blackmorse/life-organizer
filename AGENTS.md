@@ -104,8 +104,11 @@ parent. Ambiguous matches request a new recording with full name/category.
 After a successful voice completion, the bot sends the live, shared daily summary
 with updated completion marks. Summary-load or delivery failure preserves progress;
 `/today` retries the summary without repeating the mutation.
-Each recording is independent; unrelated speech is echoed. No tasks are created
-and transcripts are not persisted. See the backend guide for integration details.
+Each recording is independent and can complete one item; unrelated speech is echoed.
+Example requests: “What are my tasks for today?”, “Mark buy groceries completed.”,
+or “I finished the deploy backend step in Release, category Work.” No tasks are
+created and transcripts are not persisted. See the backend guide for integration
+details.
 
 After the 08:00 setup, the bot reminds users of unfinished ordinary tasks outside
 Tasks of the day, ordered Soon → Upcoming → Someday. A Yes/No offer waits for the
@@ -147,13 +150,46 @@ Reminders never recur or carry over. Rescheduling clears daily selection and old
 buttons cannot select changed dates/timezones. Completed reminders remain in their
 own tab and can be reopened. No separate event-time alert is sent.
 
-## Guidance for future changes
+## Container images and runtime
 
 Alpine-based multi-stage Dockerfiles live in each subproject. Separate GitHub
 Actions workflows publish frontend/backend images to this repository's GHCR
 packages on pushes to `main` changing `frontend/**` or `backend/**`, respectively.
-Both images target `linux/amd64` and `linux/arm64`. The frontend nginx runtime
-proxies `/api` to the backend; container build/runtime usage is in `README.md`.
+Both images target `linux/amd64` and `linux/arm64`, with `latest` and
+`sha-<full-commit-sha>` tags:
+
+| Changed paths | Image |
+| --- | --- |
+| `backend/**` | `ghcr.io/blackmorse/life-organizer/backend` |
+| `frontend/**` | `ghcr.io/blackmorse/life-organizer/frontend` |
+
+Workflows authenticate with the built-in `GITHUB_TOKEN` using `packages: write`;
+no registry secret is needed. All build and runtime stages use Alpine-based images.
+
+Build locally from the repository root:
+
+```sh
+docker build -t life-organizer-backend ./backend
+docker build -t life-organizer-frontend ./frontend
+```
+
+The backend listens on `0.0.0.0:3000` in its container and requires runtime
+`DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, and `OPENAI_KEY` environment variables.
+PostgreSQL runs separately. Database migrations are embedded in the binary and
+applied at startup. Credentials are not needed during image builds.
+
+The frontend serves HTTP on port 80 and proxies `/api/*` to
+`http://backend:3000/*`, stripping `/api`. Put both containers on the same Docker
+network and name the backend container/service `backend`, or set the frontend's
+`BACKEND_URL` environment variable to another reachable backend origin (without
+a trailing slash). Configure HTTPS at the public ingress for Telegram Mini App
+hosting.
+
+## Guidance for future changes
+
+- Keep the root `README.md` focused on a high-level, human-readable description
+  of the app's purpose and capabilities. Put implementation details, migration
+  notes, and operational guidance in the appropriate `AGENTS.md` guide.
 
 Tasks of the day are implemented: users select whole active tasks or individual
 subtasks with calendar buttons, then track completion in a dedicated tab.
