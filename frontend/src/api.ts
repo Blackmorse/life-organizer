@@ -60,6 +60,11 @@ export const api = {
     task_id, subtask_index, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   }),
   removeDailyTask: (task_id: number, subtask_id: string) => request<DailyTask[]>('/daily-tasks', 'DELETE', { task_id, subtask_id }),
+  listTomorrowTasks: (signal?: AbortSignal) => request<DailyTask[]>('/tomorrow-tasks', 'GET', undefined, signal),
+  selectTomorrowTask: (task_id: number, subtask_index?: number) => request<DailyTask[]>('/tomorrow-tasks', 'POST', {
+    task_id, subtask_index, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  }),
+  removeTomorrowTask: (task_id: number, subtask_id: string) => request<DailyTask[]>('/tomorrow-tasks', 'DELETE', { task_id, subtask_id }),
   listCategories: (signal?: AbortSignal) => request<Category[]>('/categories', 'GET', undefined, signal),
   createCategory: (description: string) => request<Category>('/categories', 'POST', { description }),
   updateCategory: (id: number, description: string) => request<Category>(`/categories/${id}`, 'PUT', { description }),

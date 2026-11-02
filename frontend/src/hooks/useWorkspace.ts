@@ -7,6 +7,7 @@ export function useWorkspace() {
   const [categories, setCategories] = useState<Category[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [dailyTasks, setDailyTasks] = useState<DailyTask[]>([])
+  const [tomorrowTasks, setTomorrowTasks] = useState<DailyTask[]>([])
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([])
   const [scheduledDaily, setScheduledDaily] = useState<ScheduledOccurrence[]>([])
   const [reminders, setReminders] = useState<ReminderTask[]>([])
@@ -20,12 +21,13 @@ export function useWorkspace() {
 
   useEffect(() => {
     const controller = new AbortController()
-    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal), api.listScheduledTasks(controller.signal), api.listScheduledDaily(controller.signal), api.listReminders(controller.signal)])
-      .then(([nextCategories, nextTasks, nextDailyTasks, nextScheduled, nextScheduledDaily, nextReminders]) => {
+    Promise.all([api.listCategories(controller.signal), api.listTasks(controller.signal), api.listDailyTasks(controller.signal), api.listScheduledTasks(controller.signal), api.listScheduledDaily(controller.signal), api.listReminders(controller.signal), api.listTomorrowTasks(controller.signal)])
+      .then(([nextCategories, nextTasks, nextDailyTasks, nextScheduled, nextScheduledDaily, nextReminders, nextTomorrow]) => {
         if (controller.signal.aborted) return
         setCategories(nextCategories)
         setTasks(nextTasks)
         setDailyTasks(nextDailyTasks.filter((item) => item.expires_at > Date.now()))
+        setTomorrowTasks(nextTomorrow.filter((item) => item.expires_at > Date.now()))
         setScheduledTasks(nextScheduled)
         setScheduledDaily(nextScheduledDaily.filter((item) => item.expires_at > Date.now()))
         setReminders(normalizeReminders(nextReminders))
@@ -46,10 +48,11 @@ export function useWorkspace() {
   useEffect(() => {
     function expire() {
       setDailyTasks((items) => items.filter((item) => item.expires_at > Date.now()))
+      setTomorrowTasks((items) => items.filter((item) => item.expires_at > Date.now()))
       setScheduledDaily((items) => items.filter((item) => item.expires_at > Date.now()))
       setReminders(normalizeReminders)
     }
-    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at), ...reminders.flatMap((item) => item.expires_at !== null ? [item.expires_at] : []))
+    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...tomorrowTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at), ...reminders.flatMap((item) => item.expires_at !== null ? [item.expires_at] : []))
     const timer = Number.isFinite(nextExpiry) ? window.setTimeout(expire, Math.max(0, nextExpiry - Date.now())) : undefined
     window.addEventListener('focus', expire)
     document.addEventListener('visibilitychange', expire)
@@ -58,7 +61,7 @@ export function useWorkspace() {
       window.removeEventListener('focus', expire)
       document.removeEventListener('visibilitychange', expire)
     }
-  }, [dailyTasks, scheduledDaily, reminders])
+  }, [dailyTasks, tomorrowTasks, scheduledDaily, reminders])
 
   useEffect(() => {
     if (loading || authorizationRequired) return
@@ -146,7 +149,7 @@ export function useWorkspace() {
   }
 
   return {
-    categories, tasks, dailyTasks, scheduledTasks, scheduledDaily, reminders, loading, saving, error, authorizationRequired,
+    categories, tasks, dailyTasks, tomorrowTasks, scheduledTasks, scheduledDaily, reminders, loading, saving, error, authorizationRequired,
     saveReminder: (input: ReminderTaskInput, id?: number) => mutate(async () => {
       const [task] = normalizeReminders([await api.saveReminder(input, id)])
       setReminders((items) => id === undefined ? [...items, task] : items.map((item) => item.id === id ? task : item))
@@ -195,6 +198,15 @@ export function useWorkspace() {
     }),
     removeDailyTask: (id: number, stepId: string) => mutate(async () => {
       setDailyTasks(await api.removeDailyTask(id, stepId))
+    }),
+    selectTomorrowTask: (id: number, index?: number) => mutate(async () => {
+      const picks = await api.selectTomorrowTask(id, index)
+      const nextTasks = await api.listTasks()
+      setTasks(nextTasks)
+      setTomorrowTasks(picks.filter((item) => item.expires_at > Date.now()))
+    }),
+    removeTomorrowTask: (id: number, stepId: string) => mutate(async () => {
+      setTomorrowTasks(await api.removeTomorrowTask(id, stepId))
     }),
     refresh: () => {
       if (mutationInFlight.current || loading) return

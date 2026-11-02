@@ -34,7 +34,7 @@ export default function App() {
   )
 
   return (
-    <DailyContext.Provider value={{ picks: workspace.dailyTasks, select: workspace.selectDailyTask, remove: workspace.removeDailyTask }}>
+    <DailyContext.Provider value={{ picks: workspace.dailyTasks, select: workspace.selectDailyTask, remove: workspace.removeDailyTask, tomorrowPicks: workspace.tomorrowTasks, selectTomorrow: workspace.selectTomorrowTask, removeTomorrow: workspace.removeTomorrowTask }}>
     <Container maxWidth="md" sx={{
       pt: 'max(24px, var(--tg-content-safe-area-inset-top, 0px))',
       pb: 'max(24px, var(--tg-content-safe-area-inset-bottom, 0px))',

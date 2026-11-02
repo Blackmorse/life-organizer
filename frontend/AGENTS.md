@@ -14,6 +14,16 @@ standalone browser.
 
 ## Current functionality
 
+- Separate calendar **+1** buttons beside active ordinary tasks/subtasks toggle
+  tomorrow planning independently of today's calendar. Parent selection adds all
+  current steps, or the whole task when no steps exist. Highlighted buttons allow
+  removal and persist across Refresh. Selection saves device IANA timezone;
+  tomorrow means next calendar date, even before 02:00. At that date's 02:00 the
+  UI clears future highlights and the backend preserves picks for its 08:00 Yes/No
+  morning offer, alongside carryover/scheduled/reminder work. Yes adds unfinished
+  eligible work to today's list; No dismisses. Future picks never join today's
+  checklist or summary directly. Stable IDs preserve edits/reordering. Failed
+  writes retain selection, and loading/saving disables both calendar controls.
 - Reminder tasks tab manages category-free one-time work with description and
   required exact date/time, without urgency or subtasks. New dates are entered in
   device timezone and saved as Unix milliseconds plus IANA timezone. Existing
@@ -231,6 +241,12 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
   `subtask_id` on DELETE removes all picks for that task. Adding steps may assign
   its stable ID, so the hook reloads tasks before publishing picks. Expiry is
   server-enforced; changing device timezone does not alter existing picks' expiry.
+- `/tomorrow-tasks` GET/POST/DELETE uses the same bodies and response shape as
+  daily selection, with independent state in the hook/context. `expires_at` is
+  tomorrow's local 02:00 handoff to morning storage, not an accepted daily expiry.
+  Adding steps reloads tasks before publishing picks to obtain stable IDs. Initial
+  load/Refresh fetch future picks; timer and focus/visibility checks clear expired
+  highlights. No frontend request is required to generate/send the morning offer.
 - `POST /daily-tasks/finalize` has no body and returns `204` after Telegram accepts
   the summary. The backend derives recipient and list from verified identity and
   stored picks. Empty lists/unavailable bot chats return `400`; other Telegram

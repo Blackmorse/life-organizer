@@ -3,6 +3,15 @@
 Personal task organizer with a Rust API/Telegram bot and React Mini App.
 See `backend/AGENTS.md` and `frontend/README.md` for local development.
 
+## Planning tomorrow
+
+Calendar **+1** buttons beside tasks and subtasks save work for tomorrow,
+independently of today's list. At **08:00** in the saved device timezone, the bot
+includes that unfinished work in its daily Yes/No plan offer. Yes adds it to
+today's list; No dismisses it. Whole tasks with subtasks select all current steps.
+Tomorrow follows the next local calendar date, including across DST changes.
+Restart the backend to apply migration `0014_tomorrow_tasks.sql` automatically.
+
 ## Voice task completion
 
 Send a voice recording to the bot in private chat:

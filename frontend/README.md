@@ -5,6 +5,18 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 ## Features
 
 - Browse an expandable category/task hierarchy, with per-category counts.
+- Use the calendar **+1** button beside an active task or subtask to plan it for
+  **tomorrow**. Click its highlighted button again to remove it. A parent with
+  subtasks selects all its current steps; today and tomorrow selections are
+  independent and survive reloads. Tomorrow means the next calendar date in your
+  saved device timezone, including when planning before 2:00 AM. At tomorrow's
+  **8:00 AM**, the bot includes unfinished planned work in its usual **Yes/No**
+  plan offer alongside carryover, scheduled tasks, and reminders. Planned-only
+  mornings get an offer too. **Yes** adds eligible work to today's list without
+  duplicates; **No** skips it. Completed/deleted work is excluded. Reopen or
+  **Refresh** to load accepted picks. Future highlights clear at the target day's
+  **2:00 AM**, when picks enter morning-offer storage. Backend must be running;
+  restart catches up still-valid offers. Restart to apply `0014_tomorrow_tasks.sql`.
 - **Reminder tasks** manages one-time tasks with an exact date and time, without
   category or urgency. Enter date/time in your device timezone; reminders retain
   that saved timezone. At **8:00 AM on the preceding calendar date**, the bot lists

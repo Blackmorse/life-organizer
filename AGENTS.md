@@ -157,6 +157,16 @@ proxies `/api` to the backend; container build/runtime usage is in `README.md`.
 
 Tasks of the day are implemented: users select whole active tasks or individual
 subtasks with calendar buttons, then track completion in a dedicated tab.
+Separate calendar **+1** buttons plan ordinary tasks/subtasks for tomorrow without
+changing today's picks. Parent selection uses all current steps, as for today.
+Tomorrow means the next calendar date in the device IANA timezone captured on add,
+even before 02:00. Migration `0014_tomorrow_tasks.sql` stores independent picks;
+at the target date's 02:00 they move into durable morning-offer storage. At 08:00
+they join unfinished carryover, scheduled work, and reminders in the same Yes/No
+offer, including mornings with only planned work. Yes adds still-unfinished owned
+work to today's list without duplicates; No dismisses. Completed/deleted tasks or
+steps are filtered live, edits/reorders preserve stable links, and removing a
+future pick changes no original work. Restart catches up still-valid offers only.
 Selections persist in PostgreSQL and expire at the next 02:00 in the device's
 IANA timezone supplied when adding each pick. Adding a task with subtasks selects
 all its current steps instead of the parent, preserving completion flags; tasks

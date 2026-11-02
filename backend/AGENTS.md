@@ -149,6 +149,9 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | PUT | `/scheduled-tasks/daily/{id}/subtasks` | Replace occurrence steps and recalculate completion; return occurrences (`200`). |
 | DELETE | `/scheduled-tasks/daily/{id}` | Skip occurrence for today only; return current occurrences (`200`). |
 | GET | `/daily-tasks` | Current user's unexpired daily picks (`200`). |
+| GET | `/tomorrow-tasks` | Current user's future tomorrow picks (`200`). |
+| POST | `/tomorrow-tasks` | Plan a task/all current steps or one subtask for tomorrow (`200`). |
+| DELETE | `/tomorrow-tasks` | Remove one future step or all future picks for a task (`200`). |
 | POST | `/daily-tasks` | Select all task subtasks (or the task if none), or one subtask; return current picks (`200`). |
 | DELETE | `/daily-tasks` | Remove one step or all picks for a task; return current picks (`200`). |
 | POST | `/daily-tasks/finalize` | Send the current daily list to the verified user's private bot chat (`204`). |
@@ -419,6 +422,27 @@ up still-valid morning groups only, without backfilling missed dates. A tomorrow
 notice is suppressed once that event date has started.
 
 ### Morning carryover offers
+
+Migration `0014_tomorrow_tasks.sql` adds `tomorrow_tasks`, independent of
+`daily_tasks`, with the same task-owned stable step identities. The tomorrow routes
+reuse daily selection validation, ownership, archive rejection, bulk selection,
+and removal through `DailyService` and `PgDailyDao::tomorrow`. POST/DELETE bodies
+match daily bodies; responses are `{task_id, subtask_id, expires_at}[]`. Here
+`expires_at` is the target calendar date's 02:00 handoff instant in Unix
+milliseconds, not the end of an accepted daily pick. `tomorrow_reset_at` uses the
+next local calendar date even when selection happens before 02:00, including DST.
+Tomorrow picks never appear in today's reads, `/today`, or finalized summaries.
+
+The worker sweeps expired tomorrow rows before other morning preparation; lazy
+reads and expired-pick replacement also preserve work through the existing
+`preserve_expired_daily_pick` trigger. At handoff, unfinished owned picks enter
+the same owner/timezone/reset morning group and deduplicate against carryover.
+An offer is created even with only tomorrow picks. Its 08:00 delivery, Yes/No
+decision, live completion/deletion filtering, stable step links, expiry, retry,
+and restart behavior reuse ordinary carryover. Removing future picks creates no
+offer; deleting tasks cascades, and removed steps are cleaned in the same list
+replacement transaction. Accepted picks expire at the following local 02:00.
+Expired missed dates are not backfilled. Reopen/Refresh loads bot-accepted picks.
 
 Migration `0008_morning_offers.sql` stores the IANA timezone on each daily pick.
 Legacy picks fall back to UTC; selecting them again records the current device

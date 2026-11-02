@@ -33,6 +33,9 @@ impl MorningStore {
     }
 
     pub async fn sweep(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM tomorrow_tasks WHERE expires_at <= statement_timestamp()")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("DELETE FROM daily_tasks WHERE expires_at <= statement_timestamp()")
             .execute(&self.pool)
             .await?;

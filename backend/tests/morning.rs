@@ -27,6 +27,132 @@ fn daily(db: &TestDb) -> PgDailyDao {
     PgDailyDao::new(db.pool.clone(), db.user.id)
 }
 
+#[tokio::test]
+async fn tomorrow_joins_carryover_once_and_accepts_live_owned_steps() {
+    let db = TestDb::new().await;
+    let id = task(&db, "Planned").await;
+    let carried = task(&db, "Carry over").await;
+    let completed = task(&db, "Completed before morning").await;
+    let removed = task(&db, "Deleted before morning").await;
+    db.tasks()
+        .replace_subtasks(
+            id,
+            &[
+                Subtask::new("First"),
+                Subtask::new("Second"),
+                Subtask::new("Removed"),
+            ],
+        )
+        .await
+        .unwrap();
+    let tomorrow = PgDailyDao::tomorrow(db.pool.clone(), db.user.id);
+    tomorrow.select(id, None, "UTC").await.unwrap();
+    tomorrow.select(id, Some(0), "UTC").await.unwrap();
+    tomorrow.select(completed, None, "UTC").await.unwrap();
+    tomorrow.select(removed, None, "UTC").await.unwrap();
+    assert_eq!(tomorrow.list().await.unwrap().len(), 5);
+    assert!(daily(&db).list().await.unwrap().is_empty());
+    assert!(daily(&db).summary().await.unwrap().is_empty());
+    daily(&db).select(id, Some(0), "UTC").await.unwrap();
+    daily(&db).select(carried, None, "UTC").await.unwrap();
+    // Both sources belong to the same reset group, including a duplicate step.
+    sqlx::query("WITH expired AS (UPDATE daily_tasks SET expires_at=statement_timestamp() - interval '1 minute' RETURNING expires_at) UPDATE tomorrow_tasks SET expires_at=(SELECT expires_at FROM expired LIMIT 1)")
+        .execute(&db.pool).await.unwrap();
+    // Lazy reads must preserve tomorrow work even before the worker sweep.
+    assert!(tomorrow.list().await.unwrap().is_empty());
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    store.sweep().await.unwrap();
+    db.tasks().set_completed(completed, true).await.unwrap();
+    db.tasks().delete(removed).await.unwrap();
+    let mut steps = db.tasks().get(id).await.unwrap().unwrap().subtasks;
+    steps.pop();
+    steps.swap(0, 1);
+    steps[0].description = "Renamed".into();
+    steps[1].completed = true;
+    db.tasks().replace_subtasks(id, &steps).await.unwrap();
+    let offer_id = due(&db).await;
+    let offer = store.claim().await.unwrap().unwrap();
+    assert_eq!(offer.items.len(), 2);
+    assert!(
+        offer
+            .items
+            .iter()
+            .any(|item| item.subtask.as_deref() == Some("Renamed"))
+    );
+    assert_eq!(
+        store.decide(offer_id, TELEGRAM_ID + 1, true).await.unwrap(),
+        Decision::Unavailable
+    );
+    assert_eq!(
+        store.decide(offer_id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(2)
+    );
+    assert_eq!(daily(&db).list().await.unwrap().len(), 2);
+    assert_eq!(
+        store.decide(offer_id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn tomorrow_removal_decline_and_expired_days_do_not_select_work() {
+    let db = TestDb::new().await;
+    let id = task(&db, "Planned").await;
+    let tomorrow = PgDailyDao::tomorrow(db.pool.clone(), db.user.id);
+    tomorrow.select(id, None, "UTC").await.unwrap();
+    tomorrow.remove(id, "").await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    tomorrow.select(id, None, "UTC").await.unwrap();
+    sqlx::query("UPDATE tomorrow_tasks SET expires_at=statement_timestamp() - interval '1 minute'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let offer = due(&db).await;
+    assert_eq!(
+        store.decide(offer, TELEGRAM_ID, false).await.unwrap(),
+        Decision::Declined
+    );
+    assert!(daily(&db).list().await.unwrap().is_empty());
+    tomorrow.select(id, None, "UTC").await.unwrap();
+    sqlx::query("UPDATE tomorrow_tasks SET expires_at=statement_timestamp() - interval '3 days'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    store.sweep().await.unwrap();
+    assert!(store.claim().await.unwrap().is_none());
+    assert!(daily(&db).list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tomorrow_uses_next_calendar_date_before_two_and_across_dst() {
+    let db = TestDb::new().await;
+    for (zone, instant, expected) in [
+        ("UTC", "2026-10-29T00:30Z", "2026-10-30T02:00Z"),
+        ("UTC", "2026-10-29T23:59Z", "2026-10-30T02:00Z"),
+        ("America/New_York", "2026-03-07T13:00Z", "2026-03-08T07:00Z"),
+        ("America/New_York", "2026-10-31T12:00Z", "2026-11-01T07:00Z"),
+        ("Asia/Kathmandu", "2026-10-29T18:30Z", "2026-10-30T20:15Z"),
+    ] {
+        let correct: bool = sqlx::query_scalar(
+            "SELECT tomorrow_reset_at($1, $2::text::timestamptz)=$3::text::timestamptz",
+        )
+        .bind(zone)
+        .bind(instant)
+        .bind(expected)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(correct, "{zone} at {instant}");
+    }
+}
+
 async fn expire(db: &TestDb) {
     sqlx::query("UPDATE daily_tasks SET expires_at = statement_timestamp() - interval '1 minute'")
         .execute(&db.pool)

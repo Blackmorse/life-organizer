@@ -52,3 +52,29 @@ pub async fn remove(
         w.daily.remove(input.task_id, &input.subtask_id).await?,
     ))
 }
+
+pub async fn list_tomorrow(
+    Extension(w): Extension<Workspace>,
+) -> Result<Json<Vec<DailyTask>>, ServiceError> {
+    Ok(Json(w.tomorrow.list().await?))
+}
+
+pub async fn select_tomorrow(
+    Extension(w): Extension<Workspace>,
+    Json(input): Json<Selection>,
+) -> Result<Json<Vec<DailyTask>>, ServiceError> {
+    Ok(Json(
+        w.tomorrow
+            .select(input.task_id, input.subtask_index, &input.timezone)
+            .await?,
+    ))
+}
+
+pub async fn remove_tomorrow(
+    Extension(w): Extension<Workspace>,
+    Json(input): Json<Removal>,
+) -> Result<Json<Vec<DailyTask>>, ServiceError> {
+    Ok(Json(
+        w.tomorrow.remove(input.task_id, &input.subtask_id).await?,
+    ))
+}

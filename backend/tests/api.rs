@@ -76,6 +76,183 @@ async fn request_as(
 }
 
 #[tokio::test]
+async fn tomorrow_selection_is_independent_persistent_scoped_and_validated() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Plan", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    db.task_service()
+        .replace_subtasks(task.id, &[Subtask::new("First"), Subtask::new("Second")])
+        .await
+        .unwrap();
+    let app = db.app();
+    for input in [
+        json!({"task_id":task.id,"timezone":"Invalid/Zone"}),
+        json!({"task_id":0,"timezone":"UTC"}),
+    ] {
+        assert_eq!(
+            request(&app, "POST", "/tomorrow-tasks", Some(input))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/tomorrow-tasks",
+            Some(json!({"task_id":task.id,"timezone":"UTC","subtask_index":9}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "POST",
+            "/tomorrow-tasks",
+            Some(json!({"task_id":task.id,"timezone":"UTC"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let input = json!({"task_id":task.id,"timezone":"Europe/Berlin"});
+    let (status, selected) = request(&app, "POST", "/tomorrow-tasks", Some(input.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected.as_array().unwrap().len(), 2);
+    assert_eq!(
+        request(&app, "POST", "/tomorrow-tasks", Some(input))
+            .await
+            .1,
+        selected
+    );
+    assert_eq!(
+        request(&app, "GET", "/tomorrow-tasks", None).await.1,
+        selected
+    );
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None).await.1,
+        json!([])
+    );
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "GET",
+            "/tomorrow-tasks",
+            None
+        )
+        .await
+        .1,
+        json!([])
+    );
+    let expiry_correct: bool = sqlx::query_scalar("SELECT bool_and(expires_at=tomorrow_reset_at(timezone, statement_timestamp())) FROM tomorrow_tasks").fetch_one(&db.pool).await.unwrap();
+    assert!(expiry_correct);
+    request(
+        &app,
+        "POST",
+        "/daily-tasks",
+        Some(json!({"task_id":task.id,"timezone":"UTC","subtask_index":0})),
+    )
+    .await;
+    let removal = json!({"task_id":task.id,"subtask_id":selected[0]["subtask_id"]});
+    request_as(
+        &app,
+        support::TELEGRAM_ID + 1,
+        "DELETE",
+        "/tomorrow-tasks",
+        Some(removal.clone()),
+    )
+    .await;
+    assert_eq!(
+        request(&app, "GET", "/tomorrow-tasks", None).await.1,
+        selected
+    );
+    assert_eq!(
+        request(&app, "DELETE", "/tomorrow-tasks", Some(removal))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        request(&app, "GET", "/daily-tasks", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Step replacement drops only removed identities, retaining reordered picks.
+    let mut steps = db.task_service().get(task.id).await.unwrap().subtasks;
+    steps.reverse();
+    db.task_service()
+        .replace_subtasks(task.id, &steps)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "GET", "/tomorrow-tasks", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    db.task_service()
+        .replace_subtasks(task.id, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "GET", "/tomorrow-tasks", None).await.1,
+        json!([])
+    );
+    request(
+        &app,
+        "POST",
+        "/tomorrow-tasks",
+        Some(json!({"task_id":task.id,"timezone":"UTC"})),
+    )
+    .await;
+    db.task_service()
+        .set_completed(task.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/tomorrow-tasks",
+            Some(json!({"task_id":task.id,"timezone":"UTC"}))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    request(
+        &app,
+        "DELETE",
+        "/tomorrow-tasks",
+        Some(json!({"task_id":task.id,"subtask_id":""})),
+    )
+    .await;
+    assert_eq!(
+        request(&app, "GET", "/tomorrow-tasks", None).await.1,
+        json!([])
+    );
+}
+
+#[tokio::test]
 async fn finalizing_sends_only_current_owned_picks_to_verified_telegram_user() {
     let db = TestDb::new().await;
     let category = db.category_service().create("Work <&>").await.unwrap();
@@ -1230,6 +1407,9 @@ async fn every_route_requires_verified_telegram_identity() {
         ("POST", "/daily-tasks/finalize"),
         ("POST", "/daily-tasks"),
         ("DELETE", "/daily-tasks"),
+        ("GET", "/tomorrow-tasks"),
+        ("POST", "/tomorrow-tasks"),
+        ("DELETE", "/tomorrow-tasks"),
         ("GET", "/categories"),
         ("POST", "/categories"),
         ("GET", "/categories/1"),

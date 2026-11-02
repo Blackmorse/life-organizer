@@ -63,6 +63,7 @@ pub async fn authenticate(
             user.id,
         ))),
         daily: DailyService::new(Arc::new(PgDailyDao::new(state.pool.clone(), user.id))),
+        tomorrow: DailyService::new(Arc::new(PgDailyDao::tomorrow(state.pool.clone(), user.id))),
         categories: CategoryService::new(Arc::new(PgCategoryDao::new(state.pool.clone(), user.id))),
         tasks: TaskService::new(Arc::new(PgTaskDao::new(state.pool.clone(), user.id))),
     });

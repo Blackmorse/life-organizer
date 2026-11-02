@@ -32,6 +32,7 @@ pub(super) struct Workspace {
     pub reminders: ReminderService,
     pub scheduled: ScheduledService,
     pub daily: DailyService,
+    pub tomorrow: DailyService,
     pub categories: CategoryService,
     pub tasks: TaskService,
 }
@@ -90,6 +91,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/daily-tasks",
             get(daily::list).post(daily::select).delete(daily::remove),
+        )
+        .route(
+            "/tomorrow-tasks",
+            get(daily::list_tomorrow)
+                .post(daily::select_tomorrow)
+                .delete(daily::remove_tomorrow),
         )
         .route(
             "/daily-tasks/finalize",

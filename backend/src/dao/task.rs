@@ -209,6 +209,8 @@ impl TaskDao for PgTaskDao {
             .await?;
         sqlx::query("DELETE FROM daily_tasks d WHERE d.task_id = $1 AND d.subtask_id <> '' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements($2::jsonb) s WHERE s->>'id' = d.subtask_id)")
             .bind(id).bind(Json(subtasks)).execute(&mut *transaction).await?;
+        sqlx::query("DELETE FROM tomorrow_tasks d WHERE d.task_id = $1 AND d.subtask_id <> '' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements($2::jsonb) s WHERE s->>'id' = d.subtask_id)")
+            .bind(id).bind(Json(subtasks)).execute(&mut *transaction).await?;
         transaction.commit().await?;
         row.map(task).transpose()
     }

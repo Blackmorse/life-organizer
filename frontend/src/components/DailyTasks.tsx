@@ -1,6 +1,7 @@
 import { useContext, useState } from 'react'
 import { Alert, Box, Button, Checkbox, IconButton, List, ListItem, Stack, Tooltip, Typography } from '@mui/material'
 import TodayOutlinedIcon from '@mui/icons-material/TodayOutlined'
+import EventOutlinedIcon from '@mui/icons-material/EventOutlined'
 import CloseIcon from '@mui/icons-material/Close'
 import SendOutlinedIcon from '@mui/icons-material/SendOutlined'
 import type { Category, DailyTask, Subtask, Task, ScheduledOccurrence, ReminderTask } from '../types'
@@ -15,13 +16,20 @@ export function DailyPickButton({ taskId, step, steps = [], index, label, disabl
 }) {
   const daily = useContext(DailyContext)
   if (!daily) return null
-  const picked = (id: string | undefined) => id !== undefined && daily.picks.some((item) => item.task_id === taskId && item.subtask_id === id)
-  const selected = index === undefined ? picked('') || (steps.length > 0 && steps.every((item) => picked(item.id))) : picked(step?.id)
-  const action = `${selected ? 'Remove from' : 'Add to'} Tasks of the day: ${label}`
-  return <Tooltip title={action}><span><IconButton size="small" color={selected ? 'primary' : 'default'} aria-label={action} aria-pressed={selected} disabled={disabled}
-    onClick={() => void (selected ? daily.remove(taskId, step?.id ?? '') : daily.select(taskId, index))}>
-    <TodayOutlinedIcon fontSize="small" />
-  </IconButton></span></Tooltip>
+  return <Stack component="span" direction="row" sx={{ flexShrink: 0 }}>
+    {[
+      { name: 'Tasks of the day', picks: daily.picks, select: daily.select, remove: daily.remove, tomorrow: false },
+      { name: 'Tomorrow', picks: daily.tomorrowPicks, select: daily.selectTomorrow, remove: daily.removeTomorrow, tomorrow: true },
+    ].map(({ name, picks, select, remove, tomorrow }) => {
+      const picked = (id: string | undefined) => id !== undefined && picks.some((item) => item.task_id === taskId && item.subtask_id === id && item.expires_at > Date.now())
+      const selected = index === undefined ? picked('') || (steps.length > 0 && steps.every((item) => picked(item.id))) : picked(step?.id)
+      const action = `${selected ? 'Remove from' : 'Add to'} ${name}: ${label}`
+      return <Tooltip key={name} title={tomorrow ? `${action}. Offered by the bot tomorrow at 08:00.` : action}><span><IconButton size="small" color={selected ? 'primary' : 'default'} aria-label={action} aria-pressed={selected} disabled={disabled}
+        onClick={() => void (selected ? remove(taskId, step?.id ?? '') : select(taskId, index))}>
+        {tomorrow ? <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', '&::after': { content: '"+1"', fontSize: '0.65rem', fontWeight: 700 } }}><EventOutlinedIcon fontSize="small" /></Box> : <TodayOutlinedIcon fontSize="small" />}
+      </IconButton></span></Tooltip>
+    })}
+  </Stack>
 }
 
 export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onSetCompleted, onReplaceSubtasks, scheduled, onCompleteScheduled, onSubtasksScheduled, onDismissScheduled, reminders, onCompleteReminder, onDismissReminder }: {

@@ -100,7 +100,7 @@ impl MorningWorker {
             if !offer.items.is_empty() {
                 messages.extend(summary_messages(
                     &offer.items,
-                    "Suggested tasks for today: scheduled work, reminders and unfinished daily picks",
+                    "Suggested tasks for today: planned tasks, scheduled work, reminders and unfinished daily picks",
                     "Add these tasks to Tasks of the day?",
                 ));
                 self.bot.offer(offer.recipient, offer.id, &messages).await?;
