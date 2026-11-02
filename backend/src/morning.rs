@@ -28,6 +28,10 @@ pub struct BotCallback {
 
 #[async_trait]
 pub trait MorningBot: MessageSender {
+    fn polling_id(&self) -> i64 {
+        0
+    }
+
     async fn download_voice(&self, _file_id: &str) -> Result<Vec<u8>, SpeechError> {
         Err(SpeechError::RecognitionFailed)
     }
@@ -55,7 +59,7 @@ impl MorningWorker {
     pub fn new(pool: PgPool, bot: Arc<dyn MorningBot>) -> Self {
         Self {
             pool: pool.clone(),
-            store: MorningStore::new(pool.clone()),
+            store: MorningStore::new(pool.clone()).for_bot(bot.polling_id()),
             commands: BotCommands::new(pool),
             bot,
             speech: None,
@@ -126,7 +130,11 @@ impl MorningWorker {
     }
 
     pub async fn poll(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        for update in self.bot.updates(self.store.offset().await?).await? {
+        let mut offset = self.store.offset().await?;
+        for update in self.bot.updates(offset).await? {
+            if update.id < offset {
+                continue;
+            }
             if let Some(callback) = update.callback {
                 let text = if let Some((id, yes)) = parse_choice(&callback.data)
                     .filter(|_| callback.private_chat == Some(callback.sender))
@@ -145,6 +153,11 @@ impl MorningWorker {
                 // acknowledgement must not block later updates indefinitely.
                 let _ = self.bot.answer(&callback.id, text).await;
             }
+            // Persist before command/voice side effects. If storage fails, do not
+            // send a reply that the next poll would send again. Callback choices
+            // above are durable and idempotent if this write needs a retry.
+            offset = update.id + 1;
+            self.store.advance(offset).await?;
             if let Some(message) = update.message.as_ref()
                 && message.voice.is_some()
                 && let Some(speech) = &self.speech
@@ -171,7 +184,6 @@ impl MorningWorker {
                 }
                 eprintln!("Bot command failed; the user can retry the command.");
             }
-            self.store.advance(update.id + 1).await?;
         }
         // Decisions are committed and offsets advanced before follow-up delivery.
         // A failed reminder retries via its lease rather than replaying a callback.

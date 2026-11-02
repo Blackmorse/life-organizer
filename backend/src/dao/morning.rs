@@ -5,6 +5,7 @@ type MorningSummaryRow = (i64, String, String, Option<String>, i64, Option<i64>)
 
 pub struct MorningStore {
     pool: PgPool,
+    bot_id: i64,
 }
 
 pub struct MorningOffer {
@@ -23,7 +24,12 @@ pub enum Decision {
 
 impl MorningStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, bot_id: 0 }
+    }
+
+    pub fn for_bot(mut self, bot_id: i64) -> Self {
+        self.bot_id = bot_id;
+        self
     }
 
     pub async fn sweep(&self) -> Result<(), sqlx::Error> {
@@ -253,13 +259,17 @@ impl MorningStore {
     }
 
     pub async fn offset(&self) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar("SELECT next_update_id FROM bot_poll_state")
-            .fetch_one(&self.pool)
-            .await
+        sqlx::query_scalar(
+            "SELECT COALESCE((SELECT next_update_id FROM bot_poll_offsets WHERE bot_id = $1), 0)",
+        )
+        .bind(self.bot_id)
+        .fetch_one(&self.pool)
+        .await
     }
 
     pub async fn advance(&self, offset: i64) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE bot_poll_state SET next_update_id = GREATEST(next_update_id, $1)")
+        sqlx::query("INSERT INTO bot_poll_offsets (bot_id, next_update_id) VALUES ($1, $2) ON CONFLICT (bot_id) DO UPDATE SET next_update_id = GREATEST(bot_poll_offsets.next_update_id, EXCLUDED.next_update_id)")
+            .bind(self.bot_id)
             .bind(offset)
             .execute(&self.pool)
             .await?;

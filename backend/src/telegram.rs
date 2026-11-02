@@ -9,6 +9,7 @@ use std::time::Duration;
 pub struct TelegramSender {
     client: reqwest::Client,
     endpoint: String,
+    bot_id: i64,
 }
 
 impl TelegramSender {
@@ -20,6 +21,11 @@ impl TelegramSender {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             endpoint: format!("https://api.telegram.org/bot{token}/sendMessage"),
+            bot_id: token
+                .split(':')
+                .next()
+                .and_then(|id| id.parse().ok())
+                .unwrap_or(0),
         })
     }
 }
@@ -80,6 +86,29 @@ mod tests {
         collections::VecDeque,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn polling_identity_uses_bot_id_and_survives_token_rotation() {
+        use crate::morning::MorningBot;
+        assert_eq!(
+            TelegramSender::new("123:first-secret")
+                .unwrap()
+                .polling_id(),
+            123
+        );
+        assert_eq!(
+            TelegramSender::new("123:rotated-secret")
+                .unwrap()
+                .polling_id(),
+            123
+        );
+        assert_eq!(
+            TelegramSender::new("456:other-secret")
+                .unwrap()
+                .polling_id(),
+            456
+        );
+    }
 
     #[derive(Clone)]
     struct FakeState {

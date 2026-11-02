@@ -237,8 +237,9 @@ not block the bot. No additional token or chat-ID environment variable is needed
   are ignored. Bare commands are supported; addressed `@bot` forms are ignored.
 - Commands reuse `DailyService::current_messages` and the owned daily DAO.
   `/remind` reuses `BacklogService::current_messages` and the owned backlog DAO.
-  Their update offset advances even on delivery failure to avoid blocking later
-  callbacks or replaying partially sent summaries. Send `/today` again to retry.
+  Their update offset is persisted before reply delivery to avoid replaying
+  commands after a storage or delivery failure. A crash between persistence and
+  delivery can lose a reply; send the command again to retry.
 
 ### Voice transcription
 
@@ -252,8 +253,8 @@ and actual bytes. Audio stays in memory and is sent to OpenAI's
 `/v1/audio/transcriptions` using `gpt-4o-mini-transcribe`. There is no task creation
 or transcript/audio database storage. Replies escape HTML and split at 4096 rendered
 UTF-16 units. Download/provider failures give a generic retry reply; update offsets
-advance even when replies fail, avoiding routine paid retranscription or blocking
-later callbacks. A crash before offset persistence can still replay an update.
+are persisted before transcription, avoiding routine paid retranscription or blocking
+later callbacks. A crash after persistence can lose a reply; resend the recording.
 
 `SpeechRecognizer` isolates bot logic from provider choice. `langchain-rust` has no
 built-in STT tool (its speech2text example is TTS), so the OpenAI adapter implements
@@ -403,8 +404,13 @@ every 30 seconds and polls `getUpdates` every 2 seconds for `callback_query` and
 A dedicated PostgreSQL advisory-lock session elects one worker per database;
 other instances wait. Keep this token's webhook disabled and do not run another
 poller for the same bot. No webhook endpoint or additional service is required.
-`bot_poll_state` persists the offset after each processed update. Offer decisions
-commit before callback acknowledgement, so replay cannot repeat an acceptance.
+Migration `0015_bot_poll_offsets.sql` stores polling offsets per numeric Telegram
+bot ID in `bot_poll_offsets`, so replacing a bot starts an independent cursor and
+rotating its token preserves its cursor. The unassignable legacy `bot_poll_state`
+cursor is retained but unused; the first upgraded poll may process pending updates
+again. Already-processed update IDs are ignored. Command/voice offsets commit
+before reply side effects; offer decisions commit before callback acknowledgement,
+so replay cannot repeat an acceptance.
 Pending deliveries use a five-minute retry lease. A network failure after Telegram
 accepted a message may produce a duplicate prompt, but its buttons still share one
 idempotent offer. All error logs omit bot URLs/tokens. Shutdown cancels the worker

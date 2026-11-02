@@ -86,6 +86,10 @@ impl TelegramSender {
 
 #[async_trait]
 impl MorningBot for TelegramSender {
+    fn polling_id(&self) -> i64 {
+        self.bot_id
+    }
+
     async fn download_voice(&self, file_id: &str) -> Result<Vec<u8>, crate::speech::SpeechError> {
         self.download_audio(file_id).await
     }

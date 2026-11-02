@@ -250,6 +250,7 @@ async fn no_and_expired_offers_never_add_work_and_old_backlogs_do_not_prompt() {
 
 #[derive(Default)]
 struct FakeBot {
+    bot_id: i64,
     messages: Mutex<Vec<(i64, Vec<String>)>>,
     offers: Mutex<Vec<(i64, i64, Vec<String>)>>,
     updates: Mutex<Vec<BotUpdate>>,
@@ -273,6 +274,10 @@ impl MessageSender for FakeBot {
 }
 #[async_trait]
 impl MorningBot for FakeBot {
+    fn polling_id(&self) -> i64 {
+        self.bot_id
+    }
+
     async fn configure_commands(&self) -> Result<(), NotificationError> {
         Ok(())
     }
@@ -363,6 +368,88 @@ fn command(id: i64, sender: i64, private_chat: Option<i64>, text: &str) -> BotUp
             text: text.into(),
         }),
     }
+}
+
+#[tokio::test]
+async fn replacement_bot_has_independent_cursor_and_start_is_not_replayed() {
+    let db = TestDb::new().await;
+    let first = Arc::new(FakeBot {
+        bot_id: 100,
+        ..Default::default()
+    });
+    first
+        .updates
+        .lock()
+        .unwrap()
+        .push(command(900, TELEGRAM_ID, Some(TELEGRAM_ID), "/start"));
+    MorningWorker::new(db.pool.clone(), first.clone())
+        .poll()
+        .await
+        .unwrap();
+    let second = Arc::new(FakeBot {
+        bot_id: 200,
+        ..Default::default()
+    });
+    second
+        .updates
+        .lock()
+        .unwrap()
+        .push(command(10, TELEGRAM_ID, Some(TELEGRAM_ID), "/start"));
+    MorningWorker::new(db.pool.clone(), second.clone())
+        .poll()
+        .await
+        .unwrap();
+    // Even if an already processed update is returned, restarting cannot reply twice.
+    second.updates.lock().unwrap().extend([
+        command(10, TELEGRAM_ID, Some(TELEGRAM_ID), "/start"),
+        command(11, TELEGRAM_ID, Some(TELEGRAM_ID), "/help"),
+        command(11, TELEGRAM_ID, Some(TELEGRAM_ID), "/help"),
+    ]);
+    MorningWorker::new(db.pool.clone(), second.clone())
+        .poll()
+        .await
+        .unwrap();
+    MorningWorker::new(db.pool.clone(), first.clone())
+        .poll()
+        .await
+        .unwrap();
+    assert_eq!(*first.offsets.lock().unwrap(), [0, 901]);
+    assert_eq!(*second.offsets.lock().unwrap(), [0, 11]);
+    assert_eq!(first.messages.lock().unwrap().len(), 1);
+    assert_eq!(second.messages.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn start_is_not_sent_until_offset_can_be_persisted() {
+    let db = TestDb::new().await;
+    let bot = Arc::new(FakeBot::default());
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    sqlx::query(
+        "ALTER TABLE bot_poll_offsets ADD CONSTRAINT reject_offset CHECK (next_update_id = 0)",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    bot.updates
+        .lock()
+        .unwrap()
+        .push(command(10, TELEGRAM_ID, Some(TELEGRAM_ID), "/start"));
+    assert!(worker.poll().await.is_err());
+    assert!(bot.messages.lock().unwrap().is_empty());
+    sqlx::query("ALTER TABLE bot_poll_offsets DROP CONSTRAINT reject_offset")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    bot.updates
+        .lock()
+        .unwrap()
+        .push(command(10, TELEGRAM_ID, Some(TELEGRAM_ID), "/start"));
+    worker.poll().await.unwrap();
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    assert_eq!(
+        MorningStore::new(db.pool.clone()).offset().await.unwrap(),
+        11
+    );
 }
 
 #[tokio::test]
