@@ -1,9 +1,10 @@
-//! Voice-message orchestration; no task mutations or transcript persistence.
+//! Voice transcription and optional user-scoped daily-task assistance.
 use crate::{
     bot_commands::BotMessage,
     morning::MorningBot,
     service::NotificationError,
     speech::{MAX_AUDIO_BYTES, SpeechError, SpeechRecognizer},
+    task_assistant::{AssistantReply, VoiceAssistant},
 };
 
 #[derive(serde::Deserialize)]
@@ -16,6 +17,7 @@ pub async fn handle(
     message: &BotMessage,
     bot: &dyn MorningBot,
     recognizer: &dyn SpeechRecognizer,
+    assistant: Option<&dyn VoiceAssistant>,
 ) -> Result<(), NotificationError> {
     if message.sender <= 0 || message.private_chat != Some(message.sender) {
         return Ok(());
@@ -34,12 +36,27 @@ pub async fn handle(
         recognizer.transcribe(audio).await
     }
     .await;
-    let text = match result {
-        Ok(text) if !text.trim().is_empty() => text,
-        Ok(_) => SpeechError::RecognitionFailed.to_string(),
-        Err(error) => error.to_string(),
+    let reply = match result {
+        Ok(text) if !text.trim().is_empty() => match assistant {
+            Some(assistant) => assistant
+                .respond(message.sender, &text)
+                .await
+                .unwrap_or_else(|error| plain_reply(error.to_string())),
+            None => plain_reply(text),
+        },
+        Ok(_) => plain_reply(SpeechError::RecognitionFailed.to_string()),
+        Err(error) => plain_reply(error.to_string()),
     };
-    bot.send(message.sender, &text_messages(&text)).await
+    let mut messages = text_messages(&reply.text);
+    messages.extend(reply.daily_messages);
+    bot.send(message.sender, &messages).await
+}
+
+fn plain_reply(text: String) -> AssistantReply {
+    AssistantReply {
+        text,
+        daily_messages: Vec::new(),
+    }
 }
 
 // MessageSender accepts HTML. Escape each scalar after splitting by rendered
@@ -157,10 +174,10 @@ mod tests {
             let mut message = message();
             message.sender = sender;
             message.private_chat = chat;
-            handle(&message, &bot, &recognizer).await.unwrap();
+            handle(&message, &bot, &recognizer, None).await.unwrap();
         }
         assert!(bot.downloads.lock().unwrap().is_empty());
-        handle(&message(), &bot, &recognizer).await.unwrap();
+        handle(&message(), &bot, &recognizer, None).await.unwrap();
         assert_eq!(*bot.downloads.lock().unwrap(), ["recording"]);
         assert_eq!(*recognizer.calls.lock().unwrap(), 1);
         assert_eq!(
@@ -188,7 +205,7 @@ mod tests {
             if case == 0 {
                 message.voice.as_mut().unwrap().file_size = Some(MAX_AUDIO_BYTES as u64 + 1);
             }
-            handle(&message, &bot, &recognizer).await.unwrap();
+            handle(&message, &bot, &recognizer, None).await.unwrap();
             assert_eq!(*recognizer.calls.lock().unwrap(), usize::from(case >= 2));
             let sent = bot.sent.lock().unwrap();
             assert_eq!(sent.len(), 1);
@@ -210,9 +227,80 @@ mod tests {
             result: Ok("Hello".into()),
             calls: Mutex::new(0),
         };
-        assert!(handle(&message(), &bot, &recognizer).await.is_err());
+        assert!(handle(&message(), &bot, &recognizer, None).await.is_err());
         assert_eq!(*recognizer.calls.lock().unwrap(), 1);
         assert_eq!(bot.sent.lock().unwrap().len(), 1);
+    }
+
+    struct Assistant {
+        calls: Mutex<Vec<(i64, String)>>,
+        fail: bool,
+    }
+    #[async_trait]
+    impl VoiceAssistant for Assistant {
+        async fn respond(
+            &self,
+            sender: i64,
+            text: &str,
+        ) -> Result<AssistantReply, crate::task_assistant::AssistantError> {
+            self.calls.lock().unwrap().push((sender, text.into()));
+            if self.fail {
+                Err(crate::task_assistant::AssistantError)
+            } else {
+                Ok(AssistantReply {
+                    text: "Completed: <buy groceries>".into(),
+                    daily_messages: vec!["<b>📁 Home</b>\n✅ &lt;buy groceries&gt;".into()],
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn passes_transcript_and_verified_sender_to_assistant_and_escapes_result() {
+        for (fail, fail_send) in [(false, false), (true, false), (false, true)] {
+            let bot = FakeBot {
+                fail_send,
+                ..Default::default()
+            };
+            let recognizer = Recognizer {
+                result: Ok("Mark groceries completed".into()),
+                calls: Mutex::new(0),
+            };
+            let assistant = Assistant {
+                calls: Mutex::new(Vec::new()),
+                fail,
+            };
+            let mut foreign = message();
+            foreign.private_chat = Some(456);
+            handle(&foreign, &bot, &recognizer, Some(&assistant))
+                .await
+                .unwrap();
+            assert!(assistant.calls.lock().unwrap().is_empty());
+            assert_eq!(
+                handle(&message(), &bot, &recognizer, Some(&assistant))
+                    .await
+                    .is_err(),
+                fail_send
+            );
+            assert_eq!(
+                *assistant.calls.lock().unwrap(),
+                [(123, "Mark groceries completed".into())]
+            );
+            let sent = bot.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].1.len(), if fail { 1 } else { 2 });
+            if !fail {
+                assert_eq!(sent[0].1[1], "<b>📁 Home</b>\n✅ &lt;buy groceries&gt;");
+            }
+            assert_eq!(
+                sent[0].1[0],
+                if fail {
+                    crate::task_assistant::AssistantError.to_string()
+                } else {
+                    "Completed: &lt;buy groceries&gt;".into()
+                }
+            );
+        }
     }
 
     #[test]

@@ -4,14 +4,16 @@ use backend::{
     config::Config,
     db::connect_and_migrate,
     speech::openai::OpenAiSpeechRecognizer,
+    task_assistant::TaskAssistant,
     telegram::TelegramSender,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
-    let speech = std::sync::Arc::new(OpenAiSpeechRecognizer::new(config.openai_key)?);
+    let speech = std::sync::Arc::new(OpenAiSpeechRecognizer::new(config.openai_key.clone())?);
     let pool = connect_and_migrate(&config.database_url).await?;
+    let assistant = std::sync::Arc::new(TaskAssistant::openai(pool.clone(), config.openai_key));
     let bot = std::sync::Arc::new(TelegramSender::new(&config.telegram_bot_token)?);
     let state = AppState {
         notifications: bot.clone(),
@@ -20,7 +22,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let listener = tokio::net::TcpListener::bind(config.bind_address).await?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
-    let worker = tokio::spawn(backend::morning::run(pool.clone(), bot, speech, stopped));
+    let worker = tokio::spawn(backend::morning::run(
+        pool.clone(),
+        bot,
+        speech,
+        assistant,
+        stopped,
+    ));
     println!("Listening on {}", listener.local_addr()?);
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async {

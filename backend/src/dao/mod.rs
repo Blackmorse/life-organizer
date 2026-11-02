@@ -2,6 +2,7 @@ mod backlog;
 mod category;
 pub use backlog::{BacklogDao, PgBacklogDao};
 mod daily;
+pub mod daily_work;
 mod reminder;
 pub use reminder::{PgReminderDao, ReminderDao};
 pub mod morning;

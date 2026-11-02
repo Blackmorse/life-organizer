@@ -89,12 +89,23 @@ and polls messages alongside callbacks. Commands reuse user-scoped daily logic.
 An advisory lock selects one worker. Subcategories and implementation
 plans are not implemented yet.
 
-Private-chat voice recordings are transcribed and echoed as text through a
-provider-neutral `SpeechRecognizer`. OpenAI is the initial provider, implemented
+Private-chat voice recordings are transcribed through a provider-neutral
+`SpeechRecognizer`. OpenAI is the initial provider, implemented
 as a custom `langchain-rust` Tool using `gpt-4o-mini-transcribe`; startup requires
 backend-only `OPENAI_KEY`. Telegram Ogg/Opus voice files stay in memory (20 MB
-maximum), and replies are HTML-escaped and split. Voice messages do not create
-tasks or persist transcripts. See the backend guide for integration details.
+maximum), and replies are HTML-escaped and split. A provider-neutral
+`VoiceAssistant` uses a bounded `langchain-rust` tool-calling conversation with
+OpenAI `gpt-4o-mini` and the same key. Tools list all current daily work with
+namespaced IDs, then complete an explicitly requested listed task/subtask.
+Ordinary work, accepted scheduled occurrences, and selected reminders are supported.
+Writes recheck ownership, daily membership, expiry, and descriptions under locks;
+ordinary subtask completion preserves stable IDs and auto-archives a fully completed
+parent. Ambiguous matches request a new recording with full name/category.
+After a successful voice completion, the bot sends the live, shared daily summary
+with updated completion marks. Summary-load or delivery failure preserves progress;
+`/today` retries the summary without repeating the mutation.
+Each recording is independent; unrelated speech is echoed. No tasks are created
+and transcripts are not persisted. See the backend guide for integration details.
 
 After the 08:00 setup, the bot reminds users of unfinished ordinary tasks outside
 Tasks of the day, ordered Soon → Upcoming → Someday. A Yes/No offer waits for the

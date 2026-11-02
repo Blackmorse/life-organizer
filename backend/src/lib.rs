@@ -9,4 +9,5 @@ pub mod domain;
 pub mod morning;
 pub mod service;
 pub mod speech;
+pub mod task_assistant;
 pub mod telegram;

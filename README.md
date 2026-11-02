@@ -3,6 +3,23 @@
 Personal task organizer with a Rust API/Telegram bot and React Mini App.
 See `backend/AGENTS.md` and `frontend/README.md` for local development.
 
+## Voice task completion
+
+Send a voice recording to the bot in private chat:
+
+- “What are my tasks for today?”
+- “Mark buy groceries completed.”
+- “I finished the deploy backend step in Release, category Work.”
+
+The LangChain assistant lists current daily work, matches the requested item to
+its returned ID, then completes it through an owned, guarded backend operation.
+Ordinary tasks/subtasks, accepted scheduled work and selected reminders are supported.
+For ambiguous names, send another recording with the full name and category.
+Each recording is independent and can complete one item. After completion, the bot
+sends the updated daily list automatically; `/today` resends it. Existing
+`OPENAI_KEY` powers transcription and the `gpt-4o-mini`
+assistant; restart the backend to enable the new flow.
+
 ## Container images
 
 Separate GitHub Actions workflows publish images to this repository's GitHub

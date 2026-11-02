@@ -27,7 +27,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   Users are registered automatically; category/task operations are user-scoped.
 - Private-chat voice messages are transcribed through a provider-neutral
   `SpeechRecognizer`, currently backed by a custom `langchain-rust` OpenAI tool.
-  The bot sends recognized text back; `OPENAI_KEY` is required at startup.
+  A LangChain tool-calling assistant can list today's work and complete a requested
+  task/subtask; `OPENAI_KEY` is required at startup for transcription and chat.
 - Daily-list finalization sends a summary to the verified user's private Telegram
   chat through the existing bot token, using reqwest with rustls. A background
   worker sends 08:00 rollover offers and polls Telegram messages and callback
@@ -46,6 +47,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
 | `src/bot_commands.rs` | Private-chat `/today`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
 | `src/bot_voice.rs` | Private-chat voice orchestration, transcription replies, escaping and splitting. |
+| `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion tools. |
+| `src/dao/daily_work.rs`, `src/service/daily_work.rs` | Current daily action identities and guarded atomic completion across ordinary, scheduled, and reminder work. |
 | `src/speech.rs`, `src/speech/openai.rs` | Provider-neutral speech boundary and custom LangChain OpenAI transcription tool. |
 | `src/telegram/voice.rs` | Telegram getFile resolution and bounded in-memory audio download. |
 | `src/dao/backlog.rs`, `src/service/backlog.rs` | Owned, urgency-ordered unfinished ordinary work outside today's picks. |
@@ -241,10 +244,11 @@ not block the bot. No additional token or chat-ID environment variable is needed
   commands after a storage or delivery failure. A crash between persistence and
   delivery can lose a reply; send the command again to retry.
 
-### Voice transcription
+### Voice transcription and daily-task tools
 
-Send a recorded voice message in the bot's private chat to receive its transcript
-in the original language. Only positive senders matching the private chat are
+Send a recorded voice message in the bot's private chat to list today's work or
+mark a named task/subtask completed. Unrelated speech is echoed in its original
+language. Only positive senders matching the private chat are
 handled; bot senders and edited messages are ignored. Telegram `voice` attachments
 are supported (Ogg/Opus), not arbitrary audio/document uploads.
 
@@ -263,6 +267,44 @@ Version 4.6 supports the current Rust 1.89 toolchain; newer 7.x dependencies req
 Rust 1.90. Provider calls have a 90-second timeout, 5-second connect timeout, no
 redirects and no automatic retries. Polling processes voice messages sequentially.
 Audio, transcripts, provider response bodies, and credentials are not logged.
+
+After transcription, `VoiceAssistant` resolves the user from the Telegram sender
+and starts an independent `langchain-rust` conversation using OpenAI `gpt-4o-mini`
+and the same `OPENAI_KEY`. The model receives two native function tools:
+
+- `list_tasks_of_the_day({})` returns all current daily work with task name,
+  category, optional step, completion flag and exact string ID. Namespaces are
+  `task:<id>`, `subtask:<task-id>:<stable-step-id>`, `scheduled:<occurrence-id>`,
+  `scheduled_step:<occurrence-id>:<index>`, and `reminder:<id>`. Ordinary parents
+  are included as context and completion targets even when only steps are picked.
+- `complete_task_of_the_day({"id":"..."})` accepts only an ID returned by the
+  listing tool in this recording. It sets completed to true, never toggles or
+  removes the daily pick. Parent completion archives ordinary tasks; step
+  completion updates only that stable step and auto-archives once all steps are
+  complete. Scheduled completion changes today's occurrence, never its template.
+
+Model instructions require explicit completion intent, matching actual names and
+category, and clarification for ambiguous matches. Negations, questions and future
+plans must not trigger completion. Descriptions are data, not instructions. These
+semantic decisions are model-driven; database guards enforce ownership and scope.
+Completion rechecks current ownership, unexpired selection and listed descriptions
+under row locks; changed or missing work is rejected. Scheduled steps check both
+index and description against their current occurrence. Full assistant/tool history
+is retained, with at most four model turns, one tool call per turn, and a 45-second
+timeout per model call. Parallel guessed list/completion batches are rejected.
+Successful writes receive deterministic server-backed confirmation followed by
+the freshly resolved `DailyService::current_messages` summary, using the same
+HTML grouping, status marks and splitting as `/today` and finalization. Plain
+confirmation text is escaped separately; preformatted summary chunks retain HTML.
+If loading the summary fails, the bot preserves the successful completion reply
+and directs the user to `/today`; delivery failure never retries the mutation.
+Mutation failure stops the conversation without automatic retry. Check `/today` after an
+error or lost reply before retrying. A read-only reply states that no tasks changed.
+Each recording can complete one item; clarification requires another recording
+with the full task name/category (no conversation history is stored). Audio,
+transcripts and tool results stay in memory, though OpenAI receives the transcript
+and listed daily task data to resolve requests. Tests use local model mocks and
+fresh PostgreSQL containers, with no live provider calls.
 
 ### Morning backlog reminders
 
@@ -517,7 +559,8 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 `TELEGRAM_BOT_TOKEN` is required and must belong to the bot launching this Mini App.
-`OPENAI_KEY` is required and nonblank; it authorizes voice transcription with OpenAI.
+`OPENAI_KEY` is required and nonblank; it authorizes voice transcription and
+`gpt-4o-mini` daily-task tool calling with OpenAI.
 Keep both credentials backend-only; never use `VITE_*` variables for them.
 `DATABASE_URL` is required for application startup and must point to an existing
 PostgreSQL database; the database user needs schema migration permissions.

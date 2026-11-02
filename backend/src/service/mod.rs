@@ -2,6 +2,8 @@ mod backlog;
 mod category;
 pub use backlog::BacklogService;
 mod daily;
+mod daily_work;
+pub use daily_work::DailyWorkService;
 mod reminder;
 pub use reminder::ReminderService;
 mod notification;

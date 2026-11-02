@@ -8,6 +8,7 @@ use crate::{
     },
     service::{BacklogService, MessageSender, NotificationError, ServiceError, summary_messages},
     speech::{SpeechError, SpeechRecognizer},
+    task_assistant::VoiceAssistant,
 };
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -52,6 +53,7 @@ pub struct MorningWorker {
     commands: BotCommands,
     bot: Arc<dyn MorningBot>,
     speech: Option<Arc<dyn SpeechRecognizer>>,
+    assistant: Option<Arc<dyn VoiceAssistant>>,
     backlog_delivery: tokio::sync::Mutex<()>,
 }
 
@@ -63,12 +65,18 @@ impl MorningWorker {
             commands: BotCommands::new(pool),
             bot,
             speech: None,
+            assistant: None,
             backlog_delivery: tokio::sync::Mutex::new(()),
         }
     }
 
     pub fn with_speech(mut self, speech: Arc<dyn SpeechRecognizer>) -> Self {
         self.speech = Some(speech);
+        self
+    }
+
+    pub fn with_assistant(mut self, assistant: Arc<dyn VoiceAssistant>) -> Self {
+        self.assistant = Some(assistant);
         self
     }
 
@@ -161,9 +169,14 @@ impl MorningWorker {
             if let Some(message) = update.message.as_ref()
                 && message.voice.is_some()
                 && let Some(speech) = &self.speech
-                && crate::bot_voice::handle(message, self.bot.as_ref(), speech.as_ref())
-                    .await
-                    .is_err()
+                && crate::bot_voice::handle(
+                    message,
+                    self.bot.as_ref(),
+                    speech.as_ref(),
+                    self.assistant.as_deref(),
+                )
+                .await
+                .is_err()
             {
                 eprintln!("Voice reply delivery failed; the user can send the recording again.");
             }
@@ -215,9 +228,12 @@ pub async fn run(
     pool: PgPool,
     bot: Arc<dyn MorningBot>,
     speech: Arc<dyn SpeechRecognizer>,
+    assistant: Arc<dyn VoiceAssistant>,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
-    let worker = MorningWorker::new(pool.clone(), bot).with_speech(speech);
+    let worker = MorningWorker::new(pool.clone(), bot)
+        .with_speech(speech)
+        .with_assistant(assistant);
     loop {
         if *stop.borrow() {
             return;
