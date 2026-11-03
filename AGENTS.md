@@ -165,6 +165,11 @@ Both images target `linux/amd64` and `linux/arm64`, with `latest` and
 
 Workflows authenticate with the built-in `GITHUB_TOKEN` using `packages: write`;
 no registry secret is needed. All build and runtime stages use Alpine-based images.
+Backend images build in parallel on native `ubuntu-latest` (AMD64) and
+`ubuntu-24.04-arm` (ARM64) runners, with architecture-specific BuildKit caches.
+Each build pushes by digest; a dependent job merges both digests into one
+multi-architecture manifest tagged `latest` and `sha-<full-commit-sha>` only after
+both builds succeed. Backend workflow edits also trigger publication.
 
 Build locally from the repository root:
 
