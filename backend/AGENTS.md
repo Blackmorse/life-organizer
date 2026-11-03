@@ -46,7 +46,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/telegram/morning.rs` | Morning-offer buttons, command-menu registration, message/callback polling and acknowledgements. |
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
 | `src/bot_commands.rs` | Private-chat `/today`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
-| `src/bot_voice.rs` | Private-chat voice orchestration, transcription replies, escaping and splitting. |
+| `src/bot_voice.rs` | Private-chat voice transcription and shared text/voice assistant replies, escaping and splitting. |
 | `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion tools. |
 | `src/dao/daily_work.rs`, `src/service/daily_work.rs` | Current daily action identities and guarded atomic completion across ordinary, scheduled, and reminder work. |
 | `src/speech.rs`, `src/speech/openai.rs` | Provider-neutral speech boundary and custom LangChain OpenAI transcription tool. |
@@ -239,18 +239,22 @@ not block the bot. No additional token or chat-ID environment variable is needed
   without stopping typed commands; restarting retries menu setup.
 - Incoming Telegram sender identity determines the user and reply recipient.
   Only positive sender IDs matching a private chat ID are handled. Group chats,
-  mismatched identities, bot senders, unsupported/edited messages, and unrelated text
-  are ignored. Bare commands are supported; addressed `@bot` forms are ignored.
+  mismatched identities, bot senders, and unsupported/edited messages are ignored.
+  Bare commands are supported; unknown commands and addressed `@bot` forms are
+  ignored rather than passed to the assistant.
 - Commands reuse `DailyService::current_messages` and the owned daily DAO.
   `/remind` reuses `BacklogService::current_messages` and the owned backlog DAO.
   Their update offset is persisted before reply delivery to avoid replaying
   commands after a storage or delivery failure. A crash between persistence and
   delivery can lose a reply; send the command again to retry.
 
-### Voice transcription and daily-task tools
+### Text/voice requests and daily-task tools
 
-Send a recorded voice message in the bot's private chat to list today's work or
-mark a named task/subtask completed. Unrelated speech is echoed in its original
+Send a text or recorded voice message in the bot's private chat to list today's work or
+mark a named task/subtask completed. Nonblank text that does not start with `/`
+(after leading whitespace) goes directly to the same `VoiceAssistant` used after
+transcription, with the original text and verified sender. Text needs no audio
+download or speech recognition. Unrelated input is echoed in its original
 language. Only positive senders matching the private chat are
 handled; bot senders and edited messages are ignored. Telegram `voice` attachments
 are supported (Ogg/Opus), not arbitrary audio/document uploads.
@@ -271,7 +275,7 @@ Rust 1.90. Provider calls have a 90-second timeout, 5-second connect timeout, no
 redirects and no automatic retries. Polling processes voice messages sequentially.
 Audio, transcripts, provider response bodies, and credentials are not logged.
 
-After transcription, `VoiceAssistant` resolves the user from the Telegram sender
+For typed text or after transcription, `VoiceAssistant` resolves the user from the Telegram sender
 and starts an independent `langchain-rust` conversation using OpenAI `gpt-4o-mini`
 and the same `OPENAI_KEY`. The model receives two native function tools:
 
@@ -281,7 +285,7 @@ and the same `OPENAI_KEY`. The model receives two native function tools:
   `scheduled_step:<occurrence-id>:<index>`, and `reminder:<id>`. Ordinary parents
   are included as context and completion targets even when only steps are picked.
 - `complete_task_of_the_day({"id":"..."})` accepts only an ID returned by the
-  listing tool in this recording. It sets completed to true, never toggles or
+  listing tool in this message. It sets completed to true, never toggles or
   removes the daily pick. Parent completion archives ordinary tasks; step
   completion updates only that stable step and auto-archives once all steps are
   complete. Scheduled completion changes today's occurrence, never its template.
@@ -303,9 +307,9 @@ If loading the summary fails, the bot preserves the successful completion reply
 and directs the user to `/today`; delivery failure never retries the mutation.
 Mutation failure stops the conversation without automatic retry. Check `/today` after an
 error or lost reply before retrying. A read-only reply states that no tasks changed.
-Each recording can complete one item; clarification requires another recording
+Each message can complete one item; clarification requires another text or voice message
 with the full task name/category (no conversation history is stored). Audio,
-transcripts and tool results stay in memory, though OpenAI receives the transcript
+typed text, transcripts and tool results stay in memory, though OpenAI receives the request text
 and listed daily task data to resolve requests. Tests use local model mocks and
 fresh PostgreSQL containers, with no live provider calls.
 
@@ -474,7 +478,7 @@ Migration `0015_bot_poll_offsets.sql` stores polling offsets per numeric Telegra
 bot ID in `bot_poll_offsets`, so replacing a bot starts an independent cursor and
 rotating its token preserves its cursor. The unassignable legacy `bot_poll_state`
 cursor is retained but unused; the first upgraded poll may process pending updates
-again. Already-processed update IDs are ignored. Command/voice offsets commit
+again. Already-processed update IDs are ignored. Command/text/voice offsets commit
 before reply side effects; offer decisions commit before callback acknowledgement,
 so replay cannot repeat an acceptance.
 Pending deliveries use a five-minute retry lease. A network failure after Telegram

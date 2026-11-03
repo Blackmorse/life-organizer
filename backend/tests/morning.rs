@@ -804,6 +804,78 @@ async fn failed_voice_reply_advances_offset_and_does_not_block_callbacks() {
     assert_eq!(bot.messages.lock().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn typed_requests_reach_assistant_after_offset_commit_without_replay() {
+    use backend::task_assistant::{AssistantError, AssistantReply, VoiceAssistant};
+
+    struct Assistant {
+        pool: sqlx::PgPool,
+        calls: Mutex<Vec<(i64, String)>>,
+    }
+    #[async_trait]
+    impl VoiceAssistant for Assistant {
+        async fn respond(&self, sender: i64, text: &str) -> Result<AssistantReply, AssistantError> {
+            assert_eq!(
+                MorningStore::new(self.pool.clone()).offset().await.unwrap(),
+                2
+            );
+            self.calls.lock().unwrap().push((sender, text.into()));
+            Ok(AssistantReply {
+                text: "Completed groceries".into(),
+                daily_messages: vec!["<b>Updated daily list</b>".into()],
+            })
+        }
+    }
+
+    for fail_send in [false, true] {
+        let db = TestDb::new().await;
+        let bot = Arc::new(FakeBot::default());
+        *bot.fail.lock().unwrap() = fail_send;
+        let assistant = Arc::new(Assistant {
+            pool: db.pool.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        bot.updates.lock().unwrap().extend([
+            command(
+                1,
+                TELEGRAM_ID,
+                Some(TELEGRAM_ID),
+                "Please mark groceries completed",
+            ),
+            command(2, TELEGRAM_ID, Some(TELEGRAM_ID), "/help"),
+            command(3, TELEGRAM_ID, Some(TELEGRAM_ID), "/unknown"),
+            command(4, TELEGRAM_ID, Some(TELEGRAM_ID), "/today@bot"),
+            command(5, TELEGRAM_ID, None, "Complete groceries"),
+            BotUpdate {
+                id: 6,
+                message: None,
+                callback: Some(BotCallback {
+                    id: "after-text".into(),
+                    sender: TELEGRAM_ID,
+                    private_chat: Some(TELEGRAM_ID),
+                    data: "morning:123:yes".into(),
+                }),
+            },
+        ]);
+        let worker =
+            MorningWorker::new(db.pool.clone(), bot.clone()).with_assistant(assistant.clone());
+        worker.poll().await.unwrap();
+        assert_eq!(bot.messages.lock().unwrap().len(), 2);
+        assert_eq!(
+            bot.messages.lock().unwrap()[0].1,
+            ["Completed groceries", "<b>Updated daily list</b>",]
+        );
+        assert_eq!(bot.answers.lock().unwrap().len(), 1);
+        worker.poll().await.unwrap();
+        assert_eq!(
+            *assistant.calls.lock().unwrap(),
+            [(TELEGRAM_ID, "Please mark groceries completed".into()),]
+        );
+        assert_eq!(bot.messages.lock().unwrap().len(), 2);
+        assert_eq!(*bot.offsets.lock().unwrap(), [0, 7]);
+    }
+}
+
 async fn schedule(db: &TestDb, description: &str) -> i64 {
     use backend::{
         dao::{PgScheduledDao, ScheduledDao},

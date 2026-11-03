@@ -105,6 +105,11 @@ After a successful voice completion, the bot sends the live, shared daily summar
 with updated completion marks. Summary-load or delivery failure preserves progress;
 `/today` retries the summary without repeating the mutation.
 Each recording is independent and can complete one item; unrelated speech is echoed.
+Non-command private-chat text enters the same assistant flow directly, as if
+already transcribed, with identical completion guards, replies, and daily summaries.
+Each text message is independent too; blank text, unknown slash commands, and
+addressed `@bot` commands are ignored. Polling offsets commit before assistant
+side effects so delivery failures do not replay mutations.
 Example requests: “What are my tasks for today?”, “Mark buy groceries completed.”,
 or “I finished the deploy backend step in Release, category Work.” No tasks are
 created and transcripts are not persisted. See the backend guide for integration

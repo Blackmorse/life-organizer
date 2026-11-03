@@ -1,4 +1,4 @@
-//! Voice transcription and optional user-scoped daily-task assistance.
+//! Voice transcription and shared text/voice daily-task assistance.
 use crate::{
     bot_commands::BotMessage,
     morning::MorningBot,
@@ -37,19 +37,54 @@ pub async fn handle(
     }
     .await;
     let reply = match result {
-        Ok(text) if !text.trim().is_empty() => match assistant {
-            Some(assistant) => assistant
-                .respond(message.sender, &text)
-                .await
-                .unwrap_or_else(|error| plain_reply(error.to_string())),
-            None => plain_reply(text),
-        },
+        Ok(text) if !text.trim().is_empty() => respond(message.sender, &text, assistant).await,
         Ok(_) => plain_reply(SpeechError::RecognitionFailed.to_string()),
         Err(error) => plain_reply(error.to_string()),
     };
+    send_reply(message.sender, bot, reply).await
+}
+
+/// Typed requests enter at the same boundary as recognized speech. Slash
+/// commands (including unknown/addressed forms) belong to command dispatch.
+pub async fn handle_text(
+    message: &BotMessage,
+    bot: &dyn MorningBot,
+    assistant: &dyn VoiceAssistant,
+) -> Result<(), NotificationError> {
+    if message.sender <= 0
+        || message.private_chat != Some(message.sender)
+        || message.voice.is_some()
+        || message.text.trim().is_empty()
+        || message.text.trim_start().starts_with('/')
+    {
+        return Ok(());
+    }
+    let reply = respond(message.sender, &message.text, Some(assistant)).await;
+    send_reply(message.sender, bot, reply).await
+}
+
+async fn respond(
+    sender: i64,
+    text: &str,
+    assistant: Option<&dyn VoiceAssistant>,
+) -> AssistantReply {
+    match assistant {
+        Some(assistant) => assistant
+            .respond(sender, text)
+            .await
+            .unwrap_or_else(|error| plain_reply(error.to_string())),
+        None => plain_reply(text.into()),
+    }
+}
+
+async fn send_reply(
+    sender: i64,
+    bot: &dyn MorningBot,
+    reply: AssistantReply,
+) -> Result<(), NotificationError> {
     let mut messages = text_messages(&reply.text);
     messages.extend(reply.daily_messages);
-    bot.send(message.sender, &messages).await
+    bot.send(sender, &messages).await
 }
 
 fn plain_reply(text: String) -> AssistantReply {
@@ -308,5 +343,74 @@ mod tests {
         let text = format!("{}😀<&>", "x".repeat(4095));
         let chunks = text_messages(&text);
         assert_eq!(chunks, ["x".repeat(4095), "😀&lt;&amp;&gt;".into()]);
+    }
+
+    #[tokio::test]
+    async fn typed_requests_share_assistant_replies_and_failure_handling() {
+        for (fail, fail_send) in [(false, false), (true, false), (false, true)] {
+            let bot = FakeBot {
+                fail_send,
+                ..Default::default()
+            };
+            let assistant = Assistant {
+                calls: Mutex::new(Vec::new()),
+                fail,
+            };
+            let mut message = message();
+            message.voice = None;
+            message.text = "Please mark <buy groceries> completed".into();
+            assert_eq!(
+                handle_text(&message, &bot, &assistant).await.is_err(),
+                fail_send
+            );
+            assert_eq!(
+                *assistant.calls.lock().unwrap(),
+                [(123, message.text.clone())]
+            );
+            assert!(bot.downloads.lock().unwrap().is_empty());
+            let sent = bot.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].0, 123);
+            if fail {
+                assert_eq!(
+                    sent[0].1,
+                    [crate::task_assistant::AssistantError.to_string()]
+                );
+            } else {
+                assert_eq!(
+                    sent[0].1,
+                    [
+                        "Completed: &lt;buy groceries&gt;",
+                        "<b>📁 Home</b>\n✅ &lt;buy groceries&gt;",
+                    ]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_requests_ignore_commands_blank_voice_and_unverified_chats() {
+        let bot = FakeBot::default();
+        let assistant = Assistant {
+            calls: Mutex::new(Vec::new()),
+            fail: false,
+        };
+        for text in ["", " \n", "/today", " /help", "/unknown", "/today@bot"] {
+            let mut message = message();
+            message.voice = None;
+            message.text = text.into();
+            handle_text(&message, &bot, &assistant).await.unwrap();
+        }
+        for (sender, chat) in [(123, None), (123, Some(456)), (0, Some(0)), (-1, Some(-1))] {
+            let mut message = message();
+            message.voice = None;
+            message.text = "Complete groceries".into();
+            message.sender = sender;
+            message.private_chat = chat;
+            handle_text(&message, &bot, &assistant).await.unwrap();
+        }
+        handle_text(&message(), &bot, &assistant).await.unwrap();
+        assert!(assistant.calls.lock().unwrap().is_empty());
+        assert!(bot.sent.lock().unwrap().is_empty());
     }
 }

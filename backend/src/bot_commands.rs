@@ -52,7 +52,7 @@ impl BotCommands {
                 }
             }
             Some("/start" | "/help") => vec![
-                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Send a voice message to list today's tasks or mark a task/subtask done, for example: 'Mark buy groceries completed'. Include the full name and category if names overlap. Each recording is independent. Manage tasks and progress in the Mini App.".into(),
+                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Send a text or voice message to list today's tasks or mark a task/subtask done, for example: 'Mark buy groceries completed'. Include the full name and category if names overlap. Each message is independent. Manage tasks and progress in the Mini App.".into(),
             ],
             _ => return Ok(()),
         };

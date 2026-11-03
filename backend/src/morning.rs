@@ -161,7 +161,7 @@ impl MorningWorker {
                 // acknowledgement must not block later updates indefinitely.
                 let _ = self.bot.answer(&callback.id, text).await;
             }
-            // Persist before command/voice side effects. If storage fails, do not
+            // Persist before command/text/voice side effects. If storage fails, do not
             // send a reply that the next poll would send again. Callback choices
             // above are durable and idempotent if this write needs a retry.
             offset = update.id + 1;
@@ -179,6 +179,15 @@ impl MorningWorker {
                 .is_err()
             {
                 eprintln!("Voice reply delivery failed; the user can send the recording again.");
+            }
+            if let Some(message) = update.message.as_ref()
+                && message.voice.is_none()
+                && let Some(assistant) = self.assistant.as_deref()
+                && crate::bot_voice::handle_text(message, self.bot.as_ref(), assistant)
+                    .await
+                    .is_err()
+            {
+                eprintln!("Text reply delivery failed; the user can check /today before retrying.");
             }
             if let Some(message) = update.message
                 && message.voice.is_none()
