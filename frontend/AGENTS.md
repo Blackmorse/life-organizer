@@ -85,6 +85,9 @@ standalone browser.
   list; `/start` and `/help` explain commands. Backend registers command suggestions.
 
 - Read-first category/task hierarchy, with compact rows and expandable details.
+  Collapsed task rows show the description and disclosure/calendar controls;
+  urgency, step counts, and task IDs appear only in expanded details to preserve
+  text space on mobile.
 - Active and Archive tabs. Complete moves a task into the archive; Restore returns
   it to active tasks with its category, urgency, and subtasks intact. Archive has
   read-only task/subtask details and no task/category editing or creation controls.
@@ -97,7 +100,7 @@ standalone browser.
   after explicit add actions. Task edit/delete actions live in expanded details;
   category rename/delete actions use Material UI menus.
 - Task urgency: Someday (future), Upcoming (next few weeks), Soon (next few days).
-  Create/edit forms select urgency; compact rows show a labeled badge and details
+  Create/edit forms select urgency; expanded details show a labeled badge and
   explain the planning horizon. New tasks default to Someday.
 - Required descriptions, category selection, loading/saving states, API errors,
   and failed-write draft retention.

@@ -32,14 +32,16 @@ export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onRep
         onClick={() => setExpanded(!expanded)} sx={{ display: 'flex', flex: 1, minWidth: 0, minHeight: 44, p: 1, gap: 1, textAlign: 'left', borderRadius: 1, '&:hover': { bgcolor: 'action.hover' } }}>
         {expanded ? <ExpandMoreIcon fontSize="small" color="action" /> : <ChevronRightIcon fontSize="small" color="action" />}
         <Typography component="span" variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{task.description}</Typography>
-        <Chip component="span" size="small" variant="outlined" label={urgency.label} color={urgency.color} title={urgency.description} />
-        {task.subtasks.length > 0 && <Typography component="span" variant="caption" color="text.secondary">{task.subtasks.filter((step) => step.completed).length}/{task.subtasks.length} steps</Typography>}
-        <Typography component="span" variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>#{task.id}</Typography>
       </ButtonBase>
       {!task.completed && <DailyPickButton taskId={task.id} steps={task.subtasks} label={task.description} disabled={disabled} />}
       </Stack>
       <Box id={`task-${task.id}-details`} hidden={!expanded} sx={{ display: expanded ? 'block' : 'none', ml: { xs: 0, sm: 3 }, mb: 1 }}>
         <Paper variant="outlined" sx={{ p: 2 }}>
+          <Stack direction="row" sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+            <Chip size="small" variant="outlined" label={urgency.label} color={urgency.color} title={urgency.description} />
+            {task.subtasks.length > 0 && <Typography variant="caption" color="text.secondary">{task.subtasks.filter((step) => step.completed).length}/{task.subtasks.length} steps</Typography>}
+            <Typography variant="caption" color="text.secondary">#{task.id}</Typography>
+          </Stack>
           {editing && !task.completed ? (
             <TaskForm categories={categories} initial={task} disabled={disabled} submitLabel="Save changes"
               onCancel={() => setEditing(false)} onSave={async (input) => {

@@ -551,19 +551,25 @@ describe('workspace', () => {
 
   it('starts with a category/task hierarchy and opens task details without showing creation forms', async () => {
     mockApi([{ id: 1, user_id: 1, description: 'Work' }, { id: 2, user_id: 1, description: 'Home' }], [
-      { id: 1, category_id: 1, description: 'Build mini app', urgency: 'upcoming', subtasks: [], completed: false },
+      { id: 1, category_id: 1, description: 'Build mini app', urgency: 'upcoming', subtasks: [{ description: 'Design', completed: true }, { description: 'Build', completed: false }], completed: false },
       { id: 2, category_id: 2, description: 'Clean desk', urgency: 'someday', subtasks: [], completed: false },
     ])
     const user = userEvent.setup()
     renderWorkspace()
     const task = await screen.findByRole('button', { name: 'View task Build mini app' })
-    expect(within(task).getByText('Upcoming')).toBeInTheDocument()
+    expect(task).toHaveTextContent(/^Build mini app$/)
+    expect(screen.getByText('Upcoming')).not.toBeVisible()
+    expect(screen.getByText('1/2 steps')).not.toBeVisible()
+    expect(screen.getByText('#1')).not.toBeVisible()
     expect(within(screen.getByRole('list', { name: 'Tasks in Work' })).getByRole('button', { name: 'View task Build mini app' })).toBe(task)
     expect(within(screen.getByRole('list', { name: 'Tasks in Home' })).queryByRole('button', { name: 'View task Build mini app' })).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Edit task Build mini app' })).not.toBeInTheDocument()
     await user.click(task)
     expect(task).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Upcoming')).toBeVisible()
+    expect(screen.getByText('1/2 steps')).toBeVisible()
+    expect(screen.getByText('#1')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Edit task Build mini app' })).toBeInTheDocument()
     await user.click(task)
     expect(screen.queryByRole('button', { name: 'Edit task Build mini app' })).not.toBeInTheDocument()
@@ -618,7 +624,8 @@ describe('workspace', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
     expect(screen.getByRole('button', { name: 'View task Build mini app' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Projects, 1 task' })).toBeInTheDocument()
-    expect(within(screen.getByRole('button', { name: 'View task Build mini app' })).getByText('Upcoming')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'View task Build mini app' }))
+    expect(screen.getByText('Upcoming')).toBeVisible()
   })
 
   it('reports category conflicts, moves tasks between branches, and deletes entities', async () => {
@@ -638,10 +645,10 @@ describe('workspace', () => {
     await user.type(within(editor).getByRole('textbox', { name: /Task description/ }), 'Moved task')
     await user.click(within(editor).getByRole('button', { name: 'Save changes' }))
     await screen.findByRole('button', { name: 'View task Moved task' })
-    expect(within(screen.getByRole('button', { name: 'View task Moved task' })).getByText('Soon')).toBeInTheDocument()
     expect(within(screen.getByRole('list', { name: 'Tasks in Work' })).queryByRole('button', { name: 'View task Moved task' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('list', { name: 'Tasks in Home' })).getByRole('button', { name: 'View task Moved task' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'View task Moved task' }))
+    expect(screen.getByText('Soon')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Delete task Moved task' }))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'View task Moved task' })).not.toBeInTheDocument())
     await categoryAction(user, 'Home', 'Delete category')
@@ -737,8 +744,8 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
     const restored = screen.getByRole('button', { name: 'View task Ship app' })
-    expect(within(restored).getByText('Soon')).toBeInTheDocument()
     await user.click(restored)
+    expect(screen.getByText('Soon')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Edit task Ship app' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Delete task Ship app' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add subtask' })).toBeInTheDocument()
