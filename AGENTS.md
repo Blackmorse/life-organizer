@@ -238,6 +238,10 @@ tasks; users can edit and explicitly resend. Users must start/unblock the bot.
 The Mini App also resends the current summary after saved completion changes
 affect daily picks. Delivery failure preserves saved progress and allows manual
 resending through Finalize tasks.
+Daily bot reports end with completed/total selected work and a ten-cell text
+progress bar with percentage. Selected tasks and subtasks each count once;
+context-only parent headings do not count. Finalization, `/today`, and completion
+reports share this footer, shown once after the full list.
 At 08:00, the bot offers unfinished picks from the previous daily list with Yes/No
 buttons. Yes restores only still-unfinished owned work, without duplicating current
 picks; No dismisses the offer. Offers expire at the next local 02:00. The backend

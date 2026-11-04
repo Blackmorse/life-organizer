@@ -205,6 +205,12 @@ are picked, steps appear below the same heading. Selected work uses 🔹 for
 unfinished picks and ✅ for completed picks. Context-only parents have no status
 emoji; they use 📋 to identify the parent task instead. Groups use category and
 task IDs so duplicate names stay separate.
+Daily reports end with `Progress today: 5/15 tasks completed` and a ten-cell text
+progress bar plus percentage (both rounded down). Each selected task or subtask
+counts once across ordinary, scheduled, and reminder work; context-only parent
+headings do not count. The footer appears once at the end, including when the report
+spans multiple messages, and is shared by finalization, `/today`, and completion
+reports. Morning offers do not show daily progress.
 Morning offers share the same category/task hierarchy. All descriptions are
 HTML-escaped, including multiline category names. The adapter uses `parse_mode: "HTML"`
 without inline keyboards. Long summaries split at 4096 rendered UTF-16 units,

@@ -60,7 +60,20 @@ pub enum NotificationError {
 }
 
 pub(super) fn daily_messages(items: &[DailyTaskSummary]) -> Vec<String> {
-    summary_messages(items, "Tasks for today are ready!", "")
+    if items.is_empty() {
+        return Vec::new();
+    }
+    // Summary rows are selected work, never the context-only parent headings.
+    let completed = items.iter().filter(|item| item.completed).count();
+    let total = items.len();
+    let filled = completed * 10 / total;
+    let footer = format!(
+        "Progress today: {completed}/{total} tasks completed\n{}{} {}%",
+        "■".repeat(filled),
+        "□".repeat(10 - filled),
+        completed * 100 / total,
+    );
+    summary_messages(items, "Tasks for today are ready!", &footer)
 }
 
 pub(crate) fn summary_messages(
@@ -253,7 +266,7 @@ mod tests {
         assert_eq!(
             visible(&messages.concat()),
             format!(
-                "Tasks for today are ready!\n\n📁 Work <&>\n{}📋 {}\n{}✅ {}\n\n",
+                "Tasks for today are ready!\n\n📁 Work <&>\n{}📋 {}\n{}✅ {}\n\nProgress today: 1/1 tasks completed\n■■■■■■■■■■ 100%",
                 "\u{a0}".repeat(4),
                 item.task,
                 "\u{a0}".repeat(8),
@@ -283,10 +296,56 @@ mod tests {
         assert_eq!(
             messages,
             vec![format!(
-                "<b>Tasks for today are ready!</b>\n\n<b>📁 Work &lt;&amp;&gt;</b>\n<b>{indent}📋 Build &lt;app&gt;</b>\n{indent}{indent}🔹 Design &amp; plan\n{indent}{indent}✅ Ship\n\n<b>{indent}🔹 Clean</b>\n\n<b>{indent}✅ Build &lt;app&gt;</b>\n{indent}{indent}🔹 Follow up\n\n",
+                "<b>Tasks for today are ready!</b>\n\n<b>📁 Work &lt;&amp;&gt;</b>\n<b>{indent}📋 Build &lt;app&gt;</b>\n{indent}{indent}🔹 Design &amp; plan\n{indent}{indent}✅ Ship\n\n<b>{indent}🔹 Clean</b>\n\n<b>{indent}✅ Build &lt;app&gt;</b>\n{indent}{indent}🔹 Follow up\n\nProgress today: 2/5 tasks completed\n■■■■□□□□□□ 40%",
                 indent = "\u{a0}".repeat(4)
             )]
         );
+    }
+
+    #[test]
+    fn daily_progress_counts_all_sources_and_handles_empty_zero_and_full_progress() {
+        assert!(daily_messages(&[]).is_empty());
+        let mut items = vec![
+            DailyTaskSummary {
+                source: DailyTaskSource::Ordinary,
+                task_id: 1,
+                category_id: Some(1),
+                category: "Work".into(),
+                task: "Build".into(),
+                subtask: Some("Ship".into()),
+                completed: false,
+            },
+            DailyTaskSummary {
+                source: DailyTaskSource::Scheduled,
+                task_id: -1,
+                category_id: None,
+                category: String::new(),
+                task: "Exercise".into(),
+                subtask: Some("Warm up".into()),
+                completed: false,
+            },
+            DailyTaskSummary {
+                source: DailyTaskSource::Reminder,
+                task_id: 1,
+                category_id: None,
+                category: String::new(),
+                task: "Appointment".into(),
+                subtask: None,
+                completed: false,
+            },
+        ];
+        for (completed, expected) in [
+            (0, "Progress today: 0/3 tasks completed\n□□□□□□□□□□ 0%"),
+            (1, "Progress today: 1/3 tasks completed\n■■■□□□□□□□ 33%"),
+            (3, "Progress today: 3/3 tasks completed\n■■■■■■■■■■ 100%"),
+        ] {
+            for (index, item) in items.iter_mut().enumerate() {
+                item.completed = index < completed;
+            }
+            let messages = daily_messages(&items);
+            assert!(messages.last().unwrap().ends_with(expected));
+            assert_eq!(messages.concat().matches("Progress today:").count(), 1);
+        }
     }
 
     #[test]
@@ -327,5 +386,6 @@ mod tests {
             "<b>{indent}📋 Exercise</b>\n{indent}{indent}🔹 Warm up"
         )));
         assert!(text.ends_with("Add these?"));
+        assert!(!text.contains("Progress today:"));
     }
 }

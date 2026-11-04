@@ -322,7 +322,7 @@ async fn finalizing_sends_only_current_owned_picks_to_verified_telegram_user() {
     assert_eq!(
         deliveries[0].1.concat(),
         format!(
-            "<b>Tasks for today are ready!</b>\n\n<b>📁 Work &lt;&amp;&gt;</b>\n<b>{indent}📋 Build</b>\n{indent}{indent}✅ Release 🚀\n{indent}{indent}🔹 Design\n\n",
+            "<b>Tasks for today are ready!</b>\n\n<b>📁 Work &lt;&amp;&gt;</b>\n<b>{indent}📋 Build</b>\n{indent}{indent}✅ Release 🚀\n{indent}{indent}🔹 Design\n\nProgress today: 1/2 tasks completed\n■■■■■□□□□□ 50%",
             indent = "\u{a0}".repeat(4)
         )
     );
