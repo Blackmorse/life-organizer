@@ -28,6 +28,39 @@ impl TaskService {
         Ok(self.dao.create(category_id, description, urgency).await?)
     }
 
+    /// Voice creation path: task and its initial steps land in one atomic write.
+    pub async fn create_with_subtasks(
+        &self,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        subtasks: &[Subtask],
+    ) -> Result<Task, ServiceError> {
+        validate_id(category_id)?;
+        validate_description(description)?;
+        for subtask in subtasks {
+            validate_description(&subtask.description)?;
+        }
+        Ok(self
+            .dao
+            .create_with_subtasks(category_id, description, urgency, subtasks)
+            .await?)
+    }
+
+    /// Appends one unchecked step only while the listed task identity still matches.
+    pub async fn append_subtask(
+        &self,
+        listed: &Task,
+        description: &str,
+    ) -> Result<Task, ServiceError> {
+        validate_id(listed.id)?;
+        validate_description(description)?;
+        self.dao
+            .append_subtask(listed, description)
+            .await?
+            .ok_or(ServiceError::NotFound("task"))
+    }
+
     pub async fn get(&self, id: i64) -> Result<Task, ServiceError> {
         validate_id(id)?;
         self.dao

@@ -50,7 +50,7 @@ impl From<ReminderRow> for ReminderTask {
         }
     }
 }
-const COLUMNS: &str = "id, description, (extract(epoch FROM due_at)*1000)::bigint AS due_at, timezone, completed, (extract(epoch FROM selected_until)*1000)::bigint AS expires_at";
+const COLUMNS: &str = "id, description, (extract(epoch FROM due_at)*1000)::bigint AS due_at, timezone, completed, CASE WHEN selected_until > statement_timestamp() THEN (extract(epoch FROM selected_until)*1000)::bigint END AS expires_at";
 
 #[async_trait]
 impl ReminderDao for PgReminderDao {

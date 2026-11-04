@@ -31,12 +31,50 @@ async fn services_validate_input_without_writing_invalid_data() {
         ));
         assert!(matches!(
             tasks
+                .create_with_subtasks(
+                    category.id,
+                    description,
+                    TaskUrgency::Someday,
+                    &[backend::domain::Subtask::new("Valid")]
+                )
+                .await,
+            Err(ServiceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            tasks
+                .create_with_subtasks(
+                    category.id,
+                    "Valid",
+                    TaskUrgency::Someday,
+                    &[backend::domain::Subtask::new(description)]
+                )
+                .await,
+            Err(ServiceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            tasks.append_subtask(&task, description).await,
+            Err(ServiceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            tasks
                 .update(task.id, category.id, description, TaskUrgency::Someday)
                 .await,
             Err(ServiceError::InvalidInput(_))
         ));
     }
     for id in [0, -1] {
+        let mut invalid_task = task.clone();
+        invalid_task.id = id;
+        assert!(matches!(
+            tasks
+                .create_with_subtasks(id, "Valid", TaskUrgency::Someday, &[])
+                .await,
+            Err(ServiceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            tasks.append_subtask(&invalid_task, "Valid").await,
+            Err(ServiceError::InvalidInput(_))
+        ));
         assert!(matches!(
             categories.get(id).await,
             Err(ServiceError::InvalidInput(_))

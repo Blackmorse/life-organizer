@@ -13,6 +13,7 @@ pub struct MorningOffer {
     pub recipient: i64,
     pub items: Vec<DailyTaskSummary>,
     pub tomorrow: Vec<DailyTaskSummary>,
+    pub yesterday: Vec<DailyTaskSummary>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -33,6 +34,8 @@ impl MorningStore {
     }
 
     pub async fn sweep(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE reminder_tasks SET selected_until=NULL WHERE selected_until <= statement_timestamp()")
+            .execute(&self.pool).await?;
         sqlx::query("DELETE FROM tomorrow_tasks WHERE expires_at <= statement_timestamp()")
             .execute(&self.pool)
             .await?;
@@ -109,11 +112,15 @@ impl MorningStore {
              FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id
              JOIN reminder_tasks r ON r.id=i.reminder_id
              WHERE i.offer_id=$1 AND r.user_id=m.user_id AND NOT r.completed
-                 AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.selected_until IS NULL
-                 AND (i.kind='today' OR (r.due_at AT TIME ZONE r.timezone)::date = (statement_timestamp() AT TIME ZONE r.timezone)::date + 1)
+                  AND r.due_at=i.due_at AND r.timezone=i.timezone
+                  AND (i.kind='yesterday' OR r.selected_until IS NULL)
+                  AND (i.kind='today'
+                      OR (i.kind='tomorrow' AND (r.due_at AT TIME ZONE r.timezone)::date = (statement_timestamp() AT TIME ZONE r.timezone)::date + 1)
+                      OR (i.kind='yesterday' AND (r.due_at AT TIME ZONE r.timezone)::date = (statement_timestamp() AT TIME ZONE r.timezone)::date - 1))
              ORDER BY r.due_at, r.id")
             .bind(id).fetch_all(&self.pool).await?;
         let mut tomorrow = Vec::new();
+        let mut yesterday = Vec::new();
         for (task_id, task, kind) in reminders {
             let item = DailyTaskSummary {
                 source: DailyTaskSource::Reminder,
@@ -126,8 +133,10 @@ impl MorningStore {
             };
             if kind == "today" {
                 items.push(item);
-            } else {
+            } else if kind == "tomorrow" {
                 tomorrow.push(item);
+            } else {
+                yesterday.push(item);
             }
         }
         Ok(Some(MorningOffer {
@@ -135,6 +144,7 @@ impl MorningStore {
             recipient,
             items,
             tomorrow,
+            yesterday,
         }))
     }
 

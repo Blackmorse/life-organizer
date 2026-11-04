@@ -27,8 +27,9 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   Users are registered automatically; category/task operations are user-scoped.
 - Private-chat voice messages are transcribed through a provider-neutral
   `SpeechRecognizer`, currently backed by a custom `langchain-rust` OpenAI tool.
-  A LangChain tool-calling assistant can list today's work and complete a requested
-  task/subtask; `OPENAI_KEY` is required at startup for transcription and chat.
+  A LangChain tool-calling assistant can list today's work, complete a requested
+  task/subtask, and create ordinary tasks or append subtasks; `OPENAI_KEY` is
+  required at startup for transcription and chat.
 - Daily-list finalization sends a summary to the verified user's private Telegram
   chat through the existing bot token, using reqwest with rustls. A background
   worker sends 08:00 rollover offers and polls Telegram messages and callback
@@ -47,7 +48,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
 | `src/bot_commands.rs` | Private-chat `/today`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
 | `src/bot_voice.rs` | Private-chat voice transcription and shared text/voice assistant replies, escaping and splitting. |
-| `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion tools. |
+| `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion/creation tools. |
 | `src/dao/daily_work.rs`, `src/service/daily_work.rs` | Current daily action identities and guarded atomic completion across ordinary, scheduled, and reminder work. |
 | `src/speech.rs`, `src/speech/openai.rs` | Provider-neutral speech boundary and custom LangChain OpenAI transcription tool. |
 | `src/telegram/voice.rs` | Telegram getFile resolution and bounded in-memory audio download. |
@@ -248,10 +249,11 @@ not block the bot. No additional token or chat-ID environment variable is needed
   commands after a storage or delivery failure. A crash between persistence and
   delivery can lose a reply; send the command again to retry.
 
-### Text/voice requests and daily-task tools
+### Text/voice requests and task tools
 
-Send a text or recorded voice message in the bot's private chat to list today's work or
-mark a named task/subtask completed. Nonblank text that does not start with `/`
+Send a text or recorded voice message in the bot's private chat to list today's work,
+mark a named task/subtask completed, create a new ordinary task with optional steps,
+or add a step to an existing active task. Nonblank text that does not start with `/`
 (after leading whitespace) goes directly to the same `VoiceAssistant` used after
 transcription, with the original text and verified sender. Text needs no audio
 download or speech recognition. Unrelated input is echoed in its original
@@ -261,8 +263,8 @@ are supported (Ogg/Opus), not arbitrary audio/document uploads.
 
 The adapter resolves `getFile` and downloads at most 20 MB, checking both metadata
 and actual bytes. Audio stays in memory and is sent to OpenAI's
-`/v1/audio/transcriptions` using `gpt-4o-mini-transcribe`. There is no task creation
-or transcript/audio database storage. Replies escape HTML and split at 4096 rendered
+`/v1/audio/transcriptions` using `gpt-4o-mini-transcribe`. No transcripts or audio
+are stored in the database. Replies escape HTML and split at 4096 rendered
 UTF-16 units. Download/provider failures give a generic retry reply; update offsets
 are persisted before transcription, avoiding routine paid retranscription or blocking
 later callbacks. A crash after persistence can lose a reply; resend the recording.
@@ -277,7 +279,7 @@ Audio, transcripts, provider response bodies, and credentials are not logged.
 
 For typed text or after transcription, `VoiceAssistant` resolves the user from the Telegram sender
 and starts an independent `langchain-rust` conversation using OpenAI `gpt-4o-mini`
-and the same `OPENAI_KEY`. The model receives two native function tools:
+and the same `OPENAI_KEY`. The model receives six native function tools:
 
 - `list_tasks_of_the_day({})` returns all current daily work with task name,
   category, optional step, completion flag and exact string ID. Namespaces are
@@ -289,25 +291,48 @@ and the same `OPENAI_KEY`. The model receives two native function tools:
   removes the daily pick. Parent completion archives ordinary tasks; step
   completion updates only that stable step and auto-archives once all steps are
   complete. Scheduled completion changes today's occurrence, never its template.
+- `list_categories({})` returns all owned categories with numeric IDs and names.
+- `list_active_tasks({})` returns all owned non-archived ordinary tasks with
+  numeric IDs, category IDs, urgency and current subtasks.
+- `create_task({"category_id":1,"description":"...","urgency":"soon","subtasks":["step",...]})`
+  creates one ordinary task in a category whose ID came from `list_categories`
+  in this message. Urgency is `soon`/`upcoming`/`someday` and defaults to
+  `someday`; optional step descriptions create an ordered unchecked subtask list
+  in the same atomic database write. Only explicit user creation intent may call it.
+- `add_subtask({"task_id":1,"description":"..."})` appends one unchecked step to
+  an active task whose ID came from `list_active_tasks` in this message. The
+  write locks the owned task row and rechecks the listed description and category
+  ID, rejecting renamed or moved targets. It preserves the latest step order and
+  stable IDs and never completes the parent. Confirmation uses the returned task.
 
-Model instructions require explicit completion intent, matching actual names and
+Model instructions require explicit completion or creation intent, matching actual names and
 category, and clarification for ambiguous matches. Negations, questions and future
-plans must not trigger completion. Descriptions are data, not instructions. These
+plans must not trigger completion or creation. Descriptions are data, not instructions. These
 semantic decisions are model-driven; database guards enforce ownership and scope.
 Completion rechecks current ownership, unexpired selection and listed descriptions
 under row locks; changed or missing work is rejected. Scheduled steps check both
-index and description against their current occurrence. Full assistant/tool history
+index and description against their current occurrence. Creation accepts only
+category/task IDs returned by this message's listing tools and rechecks ownership
+in the write itself. Full assistant/tool history
 is retained, with at most four model turns, one tool call per turn, and a 45-second
-timeout per model call. Parallel guessed list/completion batches are rejected.
-Successful writes receive deterministic server-backed confirmation followed by
+timeout per model call. Parallel guessed list/mutation batches are rejected.
+A successful completion receives deterministic server-backed confirmation followed by
 the freshly resolved `DailyService::current_messages` summary, using the same
 HTML grouping, status marks and splitting as `/today` and finalization. Plain
 confirmation text is escaped separately; preformatted summary chunks retain HTML.
+Creation replies use the same server-backed confirmation format but append no daily
+summary, because new work is not selected for today. Blank descriptions, unknown
+urgency values, missing rows and archived parents are clean pre-write rejections
+returned to the model; storage failures are ambiguous commit outcomes that stop
+the conversation without automatic retry.
 If loading the summary fails, the bot preserves the successful completion reply
 and directs the user to `/today`; delivery failure never retries the mutation.
-Mutation failure stops the conversation without automatic retry. Check `/today` after an
-error or lost reply before retrying. A read-only reply states that no tasks changed.
-Each message can complete one item; clarification requires another text or voice message
+Mutation failure stops the conversation without automatic retry. After an error or
+lost reply, check `/today` for completion changes and the Mini App's task/category
+list for created tasks or added subtasks before retrying; new work need not appear
+in `/today`. Error replies include both recovery paths. A read-only reply states
+that no tasks changed.
+Each message can complete or create one item; clarification requires another text or voice message
 with the full task name/category (no conversation history is stored). Audio,
 typed text, transcripts and tool results stay in memory, though OpenAI receives the request text
 and listed daily task data to resolve requests. Tests use local model mocks and
@@ -424,6 +449,18 @@ sent/answered do not join that offer. The existing worker, retry lease, private-
 ownership, idempotent decisions and durable delivery state apply. Restart catches
 up still-valid morning groups only, without backfilling missed dates. A tomorrow
 notice is suppressed once that event date has started.
+
+Migration `0016_missed_reminders.sql` caps existing and future daily reminder
+selections at the event date's following local 02:00, including DST. Reminder API
+responses expose expired selections as `expires_at: null` immediately; the worker
+also clears expired selection storage, preserving the reminder and its progress.
+At the next date's 08:00, morning messages end with an informational note naming
+yesterday's unfinished reminders, including ones not accepted into the daily list.
+Durable `yesterday` offer links reuse delivery leases and sent-state deduplication.
+They are never accepted by Yes or carried into today's list. Note-only mornings
+send without buttons. Delivery rechecks ownership, completion, exact instant and
+timezone; deleted/rescheduled reminders disappear. Older missed dates are not
+backfilled, and yesterday's note is suppressed once another calendar date starts.
 
 ### Morning carryover offers
 

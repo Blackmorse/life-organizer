@@ -103,6 +103,15 @@ impl MorningWorker {
                     "Suggested tasks for today: planned tasks, scheduled work, reminders and unfinished daily picks",
                     "Add these tasks to Tasks of the day?",
                 ));
+            }
+            if !offer.yesterday.is_empty() {
+                messages.extend(summary_messages(
+                    &offer.yesterday,
+                    "Note: you haven't completed these reminder tasks from yesterday",
+                    "These reminders are not added to today's list.",
+                ));
+            }
+            if !offer.items.is_empty() {
                 self.bot.offer(offer.recipient, offer.id, &messages).await?;
             } else if !messages.is_empty() {
                 self.bot.send(offer.recipient, &messages).await?;

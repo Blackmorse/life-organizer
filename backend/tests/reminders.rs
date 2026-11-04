@@ -377,6 +377,266 @@ async fn morning_dates_use_calendar_days_not_24_hours_or_two_am_planning_dates()
     }
 }
 
+#[tokio::test]
+async fn reminder_expiry_upgrade_and_writes_enforce_event_days_two_am_boundary() {
+    let db = TestDb::new_at_version(15).await;
+    // These event dates cross spring DST and use a non-whole-hour timezone.
+    for (zone, due, expiry) in [
+        ("America/New_York", "2020-03-08T05:30Z", "2020-03-09T06:00Z"),
+        ("Asia/Kathmandu", "2020-10-31T18:45Z", "2020-11-01T20:15Z"),
+    ] {
+        sqlx::query("INSERT INTO reminder_tasks(user_id,description,due_at,timezone,selected_until) VALUES ($1,'Unfinished',$2::text::timestamptz,$3,$4::text::timestamptz + interval '1 day')")
+            .bind(db.user.id).bind(due).bind(zone).bind(expiry).execute(&db.pool).await.unwrap();
+    }
+    backend::db::MIGRATOR.run(&db.pool).await.unwrap();
+    for (zone, expiry) in [
+        ("America/New_York", "2020-03-09T06:00Z"),
+        ("Asia/Kathmandu", "2020-11-01T20:15Z"),
+    ] {
+        let correct: bool = sqlx::query_scalar(
+            "SELECT selected_until=$2::text::timestamptz FROM reminder_tasks WHERE timezone=$1",
+        )
+        .bind(zone)
+        .bind(expiry)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(correct);
+        let boundary: bool = sqlx::query_scalar("SELECT selected_until > $2::text::timestamptz - interval '1 millisecond' AND NOT selected_until > $2::text::timestamptz FROM reminder_tasks WHERE timezone=$1")
+            .bind(zone).bind(expiry).fetch_one(&db.pool).await.unwrap();
+        assert!(boundary);
+        // Subsequent writes cannot extend yesterday's reminder into today.
+        sqlx::query("UPDATE reminder_tasks SET selected_until=statement_timestamp()+interval '1 day' WHERE timezone=$1")
+            .bind(zone).execute(&db.pool).await.unwrap();
+        let correct: bool = sqlx::query_scalar(
+            "SELECT selected_until=$2::text::timestamptz FROM reminder_tasks WHERE timezone=$1",
+        )
+        .bind(zone)
+        .bind(expiry)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(correct);
+    }
+    let svc = service(&db, db.user.id);
+    let reminders = svc.list().await.unwrap();
+    assert_eq!(reminders.len(), 2);
+    assert!(
+        reminders
+            .iter()
+            .all(|r| r.expires_at.is_none() && !r.completed)
+    );
+    assert!(
+        svc.complete(reminders[0].id, false)
+            .await
+            .unwrap()
+            .expires_at
+            .is_none()
+    );
+    assert!(
+        PgDailyDao::new(db.pool.clone(), db.user.id)
+            .summary()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    let response = db
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri("/reminder-tasks")
+                .header("Authorization", support::authorization_for(TELEGRAM_ID))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Vec<backend::domain::ReminderTask> =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body.len(), 2);
+    assert!(body.iter().all(|r| r.expires_at.is_none() && !r.completed));
+    MorningStore::new(db.pool.clone()).sweep().await.unwrap();
+    let cleared: bool =
+        sqlx::query_scalar("SELECT bool_and(selected_until IS NULL) FROM reminder_tasks")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(cleared);
+}
+
+#[tokio::test]
+async fn missed_notice_dates_follow_saved_timezone_and_do_not_backfill_older_days() {
+    let db = TestDb::new().await;
+    for (zone, due, reset, morning, end) in [
+        (
+            "America/New_York",
+            "2020-03-07T20:30Z",
+            "2020-03-08T07:00Z",
+            "2020-03-08T12:00Z",
+            "2020-03-09T06:00Z",
+        ),
+        (
+            "Asia/Kathmandu",
+            "2020-10-31T18:45Z",
+            "2020-11-01T20:15Z",
+            "2020-11-02T02:15Z",
+            "2020-11-02T20:15Z",
+        ),
+    ] {
+        let id: i64 = sqlx::query_scalar("INSERT INTO reminder_tasks(user_id,description,due_at,timezone) VALUES ($1,'Missed',$2::text::timestamptz,$3) RETURNING id")
+            .bind(db.user.id).bind(due).bind(zone).fetch_one(&db.pool).await.unwrap();
+        // Before 02:00, no next-morning missed note exists.
+        sqlx::query("SELECT prepare_reminder_morning_offers($1::text::timestamptz - interval '1 millisecond')")
+            .bind(reset).execute(&db.pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_reminder_items WHERE reminder_id=$1 AND kind='yesterday'")
+            .bind(id).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("SELECT prepare_reminder_morning_offers($1::text::timestamptz)")
+            .bind(reset)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let correct: bool = sqlx::query_scalar("SELECT m.reset_at=$2::text::timestamptz AND m.due_at=$3::text::timestamptz AND m.valid_until=$4::text::timestamptz FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id WHERE i.reminder_id=$1 AND i.kind='yesterday'")
+            .bind(id).bind(reset).bind(morning).bind(end).fetch_one(&db.pool).await.unwrap();
+        assert!(correct);
+        sqlx::query(
+            "SELECT prepare_reminder_morning_offers($1::text::timestamptz + interval '3 days')",
+        )
+        .bind(end)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_reminder_items WHERE reminder_id=$1 AND kind='yesterday'")
+            .bind(id).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
+async fn morning_zone(db: &TestDb) -> String {
+    // Keep delivery tests independent of the machine's current time of day.
+    sqlx::query_scalar("SELECT name FROM pg_timezone_names WHERE name LIKE 'Etc/GMT%' AND extract(hour FROM statement_timestamp() AT TIME ZONE name) BETWEEN 9 AND 20 ORDER BY name LIMIT 1")
+        .fetch_one(&db.pool).await.unwrap()
+}
+
+async fn relative_reminder(db: &TestDb, zone: &str, days: i32, name: &str) -> i64 {
+    sqlx::query_scalar("INSERT INTO reminder_tasks(user_id,description,due_at,timezone) VALUES ($1,$2,(((statement_timestamp() AT TIME ZONE $3)::date + $4::integer) + time '15:30') AT TIME ZONE $3,$3) RETURNING id")
+        .bind(db.user.id).bind(name).bind(zone).bind(days).fetch_one(&db.pool).await.unwrap()
+}
+
+#[tokio::test]
+async fn missed_reminder_note_ends_morning_message_without_restoring_yesterdays_work() {
+    for with_today in [false, true] {
+        let db = TestDb::new().await;
+        let zone = morning_zone(&db).await;
+        let missed = relative_reminder(&db, &zone, -1, "Missed <&>").await;
+        // Simulate an accepted but unfinished pick from yesterday.
+        sqlx::query("UPDATE reminder_tasks SET selected_until=statement_timestamp()-interval '1 second' WHERE id=$1")
+            .bind(missed).execute(&db.pool).await.unwrap();
+        let completed = relative_reminder(&db, &zone, -1, "Already done").await;
+        service(&db, db.user.id)
+            .complete(completed, true)
+            .await
+            .unwrap();
+        relative_reminder(&db, &zone, -2, "Older missed work").await;
+        if with_today {
+            relative_reminder(&db, &zone, 0, "Today's appointment").await;
+            relative_reminder(&db, &zone, 1, "Tomorrow's appointment").await;
+        }
+        let bot = Arc::new(Bot::default());
+        let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+        worker.deliver_due().await.unwrap();
+        let offers = bot.offers.lock().unwrap().clone();
+        assert_eq!(offers.len(), usize::from(with_today));
+        let text = if with_today {
+            offers[0].concat()
+        } else {
+            bot.messages.lock().unwrap().concat()
+        };
+        assert!(text.contains("Note: you haven't completed these reminder tasks from yesterday"));
+        assert!(text.contains("Missed &lt;&amp;&gt;"));
+        assert!(!text.contains("Already done"));
+        assert!(!text.contains("Older missed work"));
+        assert!(text.ends_with("These reminders are not added to today's list."));
+        assert_eq!(text.contains("Add these tasks"), with_today);
+        if with_today {
+            assert!(
+                text.find("Add these tasks").unwrap()
+                    < text.find("Note: you haven't completed").unwrap()
+            );
+            let id: i64 = sqlx::query_scalar("SELECT id FROM morning_offers WHERE state='sent'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                MorningStore::new(db.pool.clone())
+                    .decide(id, TELEGRAM_ID, true)
+                    .await
+                    .unwrap(),
+                Decision::Accepted(1)
+            );
+        }
+        let reminders = service(&db, db.user.id).list().await.unwrap();
+        assert!(
+            reminders
+                .iter()
+                .find(|r| r.id == missed)
+                .unwrap()
+                .expires_at
+                .is_none()
+        );
+        let daily = PgDailyDao::new(db.pool.clone(), db.user.id)
+            .summary()
+            .await
+            .unwrap();
+        assert_eq!(daily.len(), usize::from(with_today));
+        assert!(daily.iter().all(|r| r.task.contains("Today's appointment")));
+        worker.deliver_due().await.unwrap();
+        assert_eq!(*bot.offers.lock().unwrap(), offers);
+        if !with_today {
+            assert_eq!(bot.messages.lock().unwrap().concat(), text);
+        }
+    }
+}
+
+#[tokio::test]
+async fn missed_notes_recheck_completion_deletion_rescheduling_and_ownership() {
+    let db = TestDb::new().await;
+    let zone = morning_zone(&db).await;
+    let completed = relative_reminder(&db, &zone, -1, "Completed later").await;
+    let deleted = relative_reminder(&db, &zone, -1, "Deleted later").await;
+    let changed = relative_reminder(&db, &zone, -1, "Rescheduled later").await;
+    let foreign = relative_reminder(&db, &zone, -1, "Other owner's reminder").await;
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let svc = service(&db, db.user.id);
+    svc.complete(completed, true).await.unwrap();
+    svc.delete(deleted).await.unwrap();
+    svc.save(Some(changed), input(&db, 2).await).await.unwrap();
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(42)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE reminder_tasks SET user_id=$2 WHERE id=$1")
+        .bind(foreign)
+        .bind(other.id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let offer = store.claim().await.unwrap().unwrap();
+    assert!(offer.yesterday.is_empty());
+    assert!(offer.items.is_empty());
+    assert!(offer.tomorrow.is_empty());
+    assert_eq!(
+        store.decide(offer.id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(0)
+    );
+}
+
 #[derive(Default)]
 struct Bot {
     messages: Mutex<Vec<String>>,

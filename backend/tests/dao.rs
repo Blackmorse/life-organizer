@@ -179,6 +179,155 @@ async fn task_crud_filtering_and_reassignment() {
 }
 
 #[tokio::test]
+async fn voice_creation_writes_steps_atomically_and_appends_preserve_identity() {
+    use backend::dao::{PgTaskDao, PgUserDao};
+    let db = TestDb::new().await;
+    let categories = db.categories();
+    let dao = db.tasks();
+    let category = categories.create("Work").await.unwrap();
+    let created = dao
+        .create_with_subtasks(
+            category.id,
+            "Release",
+            TaskUrgency::Soon,
+            &[Subtask::new("Build"), Subtask::new("Deploy")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.urgency, TaskUrgency::Soon);
+    assert!(!created.completed, "new steps start unchecked");
+    assert_eq!(created.subtasks.len(), 2);
+    assert!(created.subtasks.iter().all(|step| step.id.is_none()));
+
+    // Give the first step a stable id directly, as daily selection would.
+    sqlx::query(
+        "UPDATE tasks SET subtasks = \
+         '[{\"id\":\"17\",\"description\":\"Build\",\"completed\":false},\
+           {\"description\":\"Deploy\",\"completed\":false}]'::jsonb WHERE id = $1",
+    )
+    .bind(created.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let appended = dao
+        .append_subtask(&created, "Write tests")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        appended.subtasks,
+        [
+            Subtask {
+                id: Some("17".into()),
+                description: "Build".into(),
+                completed: false,
+            },
+            Subtask::new("Deploy"),
+            Subtask::new("Write tests"),
+        ]
+    );
+    assert!(!appended.completed);
+    assert_eq!(dao.get(created.id).await.unwrap().unwrap(), appended);
+
+    dao.set_completed(created.id, true).await.unwrap();
+    assert!(matches!(
+        dao.append_subtask(&created, "Late").await,
+        Err(DaoError::TaskArchived)
+    ));
+
+    let mut missing = created.clone();
+    missing.id = 999;
+    assert!(
+        dao.append_subtask(&missing, "Missing")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        dao.create_with_subtasks(999, "Orphan", TaskUrgency::Someday, &[])
+            .await,
+        Err(DaoError::CategoryMissing)
+    ));
+
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(support::TELEGRAM_ID + 7)
+        .await
+        .unwrap();
+    let foreign = PgTaskDao::new(db.pool.clone(), other.id);
+    assert!(
+        foreign
+            .append_subtask(&created, "Foreign")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        foreign
+            .create_with_subtasks(category.id, "Foreign", TaskUrgency::Someday, &[])
+            .await,
+        Err(DaoError::CategoryMissing)
+    ));
+    assert_eq!(
+        dao.get(created.id).await.unwrap().unwrap().subtasks.len(),
+        3,
+        "foreign writes change nothing"
+    );
+}
+
+#[tokio::test]
+async fn assistant_append_rechecks_listed_identity_after_waiting_for_concurrent_edits() {
+    use std::time::Duration;
+
+    let db = TestDb::new().await;
+    let dao = db.tasks();
+    let work = db.categories().create("Work").await.unwrap();
+    let home = db.categories().create("Home").await.unwrap();
+    for (category_id, description) in [(work.id, "Renamed"), (home.id, "Release")] {
+        let listed = dao
+            .create(work.id, "Release", TaskUrgency::Soon)
+            .await
+            .unwrap();
+        let mut edit = db.pool.begin().await.unwrap();
+        sqlx::query("UPDATE tasks SET category_id=$2, description=$3 WHERE id=$1")
+            .bind(listed.id)
+            .bind(category_id)
+            .bind(description)
+            .execute(&mut *edit)
+            .await
+            .unwrap();
+        let append = dao.append_subtask(&listed, "Deploy");
+        tokio::pin!(append);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut append)
+                .await
+                .is_err()
+        );
+        edit.commit().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), append)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        let current = dao.get(listed.id).await.unwrap().unwrap();
+        assert_eq!(current.category_id, category_id);
+        assert_eq!(current.description, description);
+        assert!(
+            current.subtasks.is_empty(),
+            "stale requests must not append steps"
+        );
+        // A fresh listing permits the same request after identity changes.
+        let updated = dao
+            .append_subtask(&current, "Deploy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.subtasks, [Subtask::new("Deploy")]);
+    }
+}
+
+#[tokio::test]
 async fn foreign_keys_prevent_orphans_and_accidental_cascade_deletion() {
     let db = TestDb::new().await;
     let categories = db.categories();

@@ -96,7 +96,11 @@ backend-only `OPENAI_KEY`. Telegram Ogg/Opus voice files stay in memory (20 MB
 maximum), and replies are HTML-escaped and split. A provider-neutral
 `VoiceAssistant` uses a bounded `langchain-rust` tool-calling conversation with
 OpenAI `gpt-4o-mini` and the same key. Tools list all current daily work with
-namespaced IDs, then complete an explicitly requested listed task/subtask.
+namespaced IDs, then complete an explicitly requested listed task/subtask, and
+also list categories and active tasks, then create an explicitly requested
+ordinary task with optional ordered steps or append one step to a listed active
+task. Creation accepts only IDs returned by this message's listings; new steps
+start unchecked and never complete the parent.
 Ordinary work, accepted scheduled occurrences, and selected reminders are supported.
 Writes recheck ownership, daily membership, expiry, and descriptions under locks;
 ordinary subtask completion preserves stable IDs and auto-archives a fully completed
@@ -104,16 +108,17 @@ parent. Ambiguous matches request a new recording with full name/category.
 After a successful voice completion, the bot sends the live, shared daily summary
 with updated completion marks. Summary-load or delivery failure preserves progress;
 `/today` retries the summary without repeating the mutation.
-Each recording is independent and can complete one item; unrelated speech is echoed.
-Non-command private-chat text enters the same assistant flow directly, as if
-already transcribed, with identical completion guards, replies, and daily summaries.
+Each recording is independent and can complete or create one item; unrelated speech is echoed.
+ Non-command private-chat text enters the same assistant flow directly, as if
+already transcribed, with identical completion and creation guards, replies, and
+daily summaries.
 Each text message is independent too; blank text, unknown slash commands, and
 addressed `@bot` commands are ignored. Polling offsets commit before assistant
 side effects so delivery failures do not replay mutations.
 Example requests: “What are my tasks for today?”, “Mark buy groceries completed.”,
-or “I finished the deploy backend step in Release, category Work.” No tasks are
-created and transcripts are not persisted. See the backend guide for integration
-details.
+“I finished the deploy backend step in Release, category Work.”, or “Add a task
+buy groceries to Home with steps milk and bread.” Transcripts are not persisted.
+See the backend guide for integration details.
 
 After the 08:00 setup, the bot reminds users of unfinished ordinary tasks outside
 Tasks of the day, ordered Soon → Upcoming → Someday. A Yes/No offer waits for the
@@ -154,6 +159,11 @@ messages and UI. Acceptance adds reminders until the following calendar day's
 Reminders never recur or carry over. Rescheduling clears daily selection and old
 buttons cannot select changed dates/timezones. Completed reminders remain in their
 own tab and can be reopened. No separate event-time alert is sent.
+Reminder selection expires at the following calendar day's 02:00 in its saved
+timezone, whether completed or not. The next 08:00 morning message ends with an
+informational note naming yesterday's unfinished reminders, without offering to
+carry them over. The note also sends when no tasks need selection; completed,
+deleted, and rescheduled reminders are filtered before delivery.
 
 ## Container images and runtime
 

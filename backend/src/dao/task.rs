@@ -14,6 +14,22 @@ pub trait TaskDao: Send + Sync {
         description: &str,
         urgency: TaskUrgency,
     ) -> Result<Task, DaoError>;
+    /// One atomic INSERT including the step list; steps start unchecked.
+    async fn create_with_subtasks(
+        &self,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        subtasks: &[Subtask],
+    ) -> Result<Task, DaoError>;
+    /// Append one unchecked step to an active task under the archive lock,
+    /// preserving existing step order and ids. None means the task is missing
+    /// or its description/category no longer matches the listed identity.
+    async fn append_subtask(
+        &self,
+        listed: &Task,
+        description: &str,
+    ) -> Result<Option<Task>, DaoError>;
     async fn get(&self, id: i64) -> Result<Option<Task>, DaoError>;
     async fn list(&self, category_id: Option<i64>) -> Result<Vec<Task>, DaoError>;
     async fn update(
@@ -110,6 +126,58 @@ impl TaskDao for PgTaskDao {
             .map_err(write_error)?
             .ok_or(DaoError::CategoryMissing)?;
         task(row)
+    }
+
+    async fn create_with_subtasks(
+        &self,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        subtasks: &[Subtask],
+    ) -> Result<Task, DaoError> {
+        let row = sqlx::query_as("INSERT INTO tasks (category_id, description, urgency, subtasks) SELECT id, $2, $4, $5 FROM categories WHERE id = $1 AND user_id = $3 RETURNING id, category_id, description, urgency, subtasks, completed")
+            .bind(category_id)
+            .bind(description)
+            .bind(self.user_id)
+            .bind(urgency.as_str())
+            .bind(Json(subtasks))
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(write_error)?
+            .ok_or(DaoError::CategoryMissing)?;
+        task(row)
+    }
+
+    async fn append_subtask(
+        &self,
+        listed: &Task,
+        description: &str,
+    ) -> Result<Option<Task>, DaoError> {
+        let id = listed.id;
+        let mut transaction = self.pool.begin().await?;
+        if !self.lock_active_task(&mut transaction, id).await? {
+            return Ok(None);
+        }
+        let (category_id, current_description, Json(mut steps)): (i64, String, Json<Vec<Subtask>>) =
+            sqlx::query_as("SELECT category_id, description, subtasks FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if category_id != listed.category_id || current_description != listed.description {
+            return Ok(None);
+        }
+        steps.push(Subtask::new(description));
+        // The appended step is unchecked, so the derived parent state stays active.
+        let completed = !steps.is_empty() && steps.iter().all(|step| step.completed);
+        let row = sqlx::query_as("UPDATE tasks t SET subtasks = $3, completed = $4 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed")
+            .bind(id)
+            .bind(self.user_id)
+            .bind(Json(&steps))
+            .bind(completed)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        row.map(task).transpose()
     }
 
     async fn get(&self, id: i64) -> Result<Option<Task>, DaoError> {
