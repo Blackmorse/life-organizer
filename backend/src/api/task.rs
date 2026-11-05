@@ -16,6 +16,7 @@ use super::Workspace;
 pub struct TaskInput {
     category_id: i64,
     description: String,
+    detailed_description: Option<String>,
     #[serde(default)]
     urgency: TaskUrgency,
 }
@@ -60,7 +61,12 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Task>), ServiceError> {
     let task = state
         .tasks
-        .create(input.category_id, &input.description, input.urgency)
+        .create_with_details(
+            input.category_id,
+            &input.description,
+            input.urgency,
+            input.detailed_description.as_deref().unwrap_or_default(),
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(task)))
 }
@@ -87,7 +93,13 @@ pub async fn update(
     Ok(Json(
         state
             .tasks
-            .update(id, input.category_id, &input.description, input.urgency)
+            .update_with_details(
+                id,
+                input.category_id,
+                &input.description,
+                input.urgency,
+                input.detailed_description.as_deref(),
+            )
             .await?,
     ))
 }

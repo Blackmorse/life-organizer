@@ -3,6 +3,7 @@ import { Box, Button, Checkbox, Chip, IconButton, List, ListItem, Paper, Stack, 
 import CloseIcon from '@mui/icons-material/Close'
 import type { ReminderTask, ReminderTaskInput } from '../types'
 import { reminderDate } from '../reminders'
+import { DetailedDescriptionDisclosure } from './DetailedDescription'
 
 function localInput(instant: number) {
   const date = new Date(instant)
@@ -15,14 +16,16 @@ function ReminderForm({ task, disabled, onSave, onCancel }: {
   onCancel: () => void
 }) {
   const [description, setDescription] = useState(task?.description ?? '')
+  const [detailedDescription, setDetailedDescription] = useState(task?.detailed_description ?? '')
   const [dateTime, setDateTime] = useState(task ? localInput(task.due_at) : '')
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const unchangedDate = task && localInput(task.due_at) === dateTime
   return <Stack component="form" spacing={2} onSubmit={async (event) => {
     event.preventDefault()
-    if (await onSave({ description: description.trim(), due_at: unchangedDate ? task.due_at : new Date(dateTime).getTime(), timezone: unchangedDate ? task.timezone : timezone }, task?.id)) onCancel()
+    if (await onSave({ description: description.trim(), detailed_description: detailedDescription, due_at: unchangedDate ? task.due_at : new Date(dateTime).getTime(), timezone: unchangedDate ? task.timezone : timezone }, task?.id)) onCancel()
   }}>
     <TextField label="Reminder description" required autoFocus value={description} disabled={disabled} onChange={(event) => setDescription(event.target.value)} />
+    <TextField label="Detailed description" multiline minRows={3} value={detailedDescription} disabled={disabled} onChange={(event) => setDetailedDescription(event.target.value)} helperText="Optional. Shown only in expanded Mini App details." />
     <TextField label="Date and time" type="datetime-local" required value={dateTime} disabled={disabled} onChange={(event) => setDateTime(event.target.value)} slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: '1970-01-01T00:00', max: '9998-12-31T23:59' } }} helperText={`Enter time in device timezone: ${timezone}. Existing reminder: ${task ? reminderDate(task) : 'new'}.`} />
     <Stack direction="row" spacing={1}>
       <Button type="submit" variant="contained" disabled={disabled || !description.trim() || !Number.isFinite(new Date(dateTime).getTime())}>Save reminder</Button>
@@ -47,6 +50,7 @@ export function ReminderTasks({ tasks, query, disabled, onSave, onDelete, onComp
       {editing === task.id ? <ReminderForm task={task} disabled={disabled} onSave={onSave} onCancel={() => setEditing(null)} /> : <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography sx={{ fontWeight: 600, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textDecoration: task.completed ? 'line-through' : undefined }}>{task.description}</Typography>
         <Typography variant="body2" color="text.secondary">{reminderDate(task)}</Typography>
+        <DetailedDescriptionDisclosure text={task.detailed_description} label={task.description} />
         {task.completed && <Chip label="Completed" size="small" sx={{ mt: 1 }} />}
         <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
           <Button disabled={disabled || editing !== null} onClick={() => setEditing(task.id)}>Edit reminder</Button>
@@ -69,6 +73,7 @@ export function ReminderDaily({ task, disabled, onComplete, onDismiss }: {
     <Stack sx={{ flex: 1, minWidth: 0, pt: 1 }}>
       <Typography sx={{ fontWeight: 600, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textDecoration: task.completed ? 'line-through' : undefined }}>{task.description}</Typography>
       <Typography variant="caption" color="text.secondary">{reminderDate(task)}</Typography>
+      <DetailedDescriptionDisclosure text={task.detailed_description} label={task.description} />
       <Chip label="Reminder" size="small" variant="outlined" sx={{ alignSelf: 'flex-start', mt: 0.5 }} />
     </Stack>
     <IconButton aria-label={`Remove from Tasks of the day: ${task.description}`} disabled={disabled} onClick={() => void onDismiss(task.id)}><CloseIcon /></IconButton>

@@ -9,6 +9,7 @@ export interface Category {
 export interface Subtask {
   id?: string
   description: string
+  detailed_description?: string
   completed: boolean
 }
 
@@ -16,6 +17,7 @@ export interface Task {
   id: number
   category_id: number
   description: string
+  detailed_description?: string
   urgency: TaskUrgency
   subtasks: Subtask[]
   completed: boolean
@@ -31,6 +33,7 @@ export interface DailyTask {
 
 export interface ScheduledTaskInput {
   description: string
+  detailed_description?: string
   weekdays: number[]
   timezone: string
   subtasks: Subtask[]
@@ -42,6 +45,7 @@ export interface ScheduledOccurrence {
   id: number
   scheduled_task_id: number
   description: string
+  detailed_description?: string
   subtasks: Subtask[]
   completed: boolean
   expires_at: number
@@ -49,6 +53,7 @@ export interface ScheduledOccurrence {
 
 export interface ReminderTaskInput {
   description: string
+  detailed_description?: string
   due_at: number
   timezone: string
 }

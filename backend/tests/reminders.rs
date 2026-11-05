@@ -20,6 +20,7 @@ async fn input(db: &TestDb, days: i32) -> ReminderTaskInput {
         .bind(days).fetch_one(&db.pool).await.unwrap();
     ReminderTaskInput {
         description: "Dentist <&>".into(),
+        detailed_description: String::new(),
         due_at,
         timezone: "UTC".into(),
     }

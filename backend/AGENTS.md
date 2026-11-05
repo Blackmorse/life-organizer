@@ -16,6 +16,10 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - SQLx 0.8 provides PostgreSQL pooling, queries, and embedded versioned migrations.
 - Category and task CRUD are implemented through DAO, service, and API layers.
 - Task urgency is implemented end-to-end: Someday (default), Upcoming, and Soon.
+- Ordinary, scheduled, and reminder tasks and their subtasks support optional
+  `detailed_description` plain-text notes, defaulting to an empty string. These
+  notes are for expanded Mini App details only, excluded from bot messages and
+  assistant tool output.
 - Tasks support optional ordered subtasks with descriptions and completion flags,
   replaced atomically. A nonempty fully completed list auto-completes the parent.
 - Task completion/restoration is implemented. Completed tasks form a read-only
@@ -85,6 +89,12 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   Extend levels by adding a new migration for the check constraint, updating
   the domain enum/string conversion, and updating the frontend urgency catalog.
 - Descriptions must not be blank; they are not unique keys.
+- Migration `0017_detailed_descriptions.sql` adds `detailed_description TEXT NOT
+  NULL DEFAULT ''` to tasks, scheduled templates/occurrences, and reminders.
+  Subtask JSON accepts an optional string `detailed_description` (missing means
+  empty); null and non-string step values are rejected. Existing names, stable
+  step IDs, ordering, and progress are preserved. Scheduled generation snapshots
+  task/step notes along with names; template edits affect future snapshots only.
 - `tasks.subtasks`: `JSONB NOT NULL DEFAULT '[]'`, an ordered array of
   `{description: string, completed: boolean}` objects. Migration
   `0004_task_subtasks.sql` originally introduced `TEXT[]` steps;
@@ -170,6 +180,16 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | PUT | `/tasks/{id}/completion` | Complete/archive or restore task; return updated task (`200`). |
 
 Category POST/PUT JSON: `{"description":"Work"}`.
+
+Task, scheduled-template, and reminder POST/PUT bodies accept optional
+`"detailed_description":"Multiline notes"`; an empty string clears notes.
+Responses include the field, including on each subtask. Ordinary task PUT preserves
+notes when this field is omitted (or null); scheduled/reminder PUT replaces it,
+defaulting to empty when omitted. Mini App forms always send the field. Subtask
+replacement defaults omitted notes to empty, so clients must preserve notes with
+IDs and completion flags on edits, reorders, and completion writes. Archived
+ordinary task notes remain read-only until restoration. Notes are never included
+in Telegram summaries, morning offers, backlog reminders, or model tool output.
 
 Daily POST JSON: `{"task_id":1,"timezone":"Europe/Berlin"}`; optional
 `"subtask_index":0` selects a zero-based step. Without an index, a task with

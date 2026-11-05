@@ -14,6 +14,12 @@ standalone browser.
 
 ## Current functionality
 
+- Task and subtask forms include optional multiline detailed descriptions, empty
+  by default. Ordinary task/archive details and expanded scheduled templates and
+  occurrences show notes as plain text with preserved line breaks. Reminder and
+  ordinary daily-list rows use Show/Hide details disclosures. Collapsed rows and
+  Telegram messages show only existing short descriptions. Notes survive refresh,
+  edits, reordering, completion, and restoration; failed writes retain drafts.
 - Separate calendar **+1** buttons beside active ordinary tasks/subtasks toggle
   tomorrow planning independently of today's calendar. Parent selection adds all
   current steps, or the whole task when no steps exist. Highlighted buttons allow
@@ -190,6 +196,11 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
 - Create: POST; update: PUT; delete: DELETE returning 204.
 - Category input: `{ "description": "Work" }`.
 - Task input: `{ "category_id": 1, "description": "Build UI", "urgency": "upcoming" }`.
+- Task, scheduled-template, reminder, and subtask inputs accept optional
+  `detailed_description: string`; omitted values default to empty on creation.
+  Forms send an empty string to clear notes. Preserve the field on all subtask
+  writes, alongside IDs and completion flags. Scheduled occurrences snapshot notes;
+  template changes do not rewrite today's notes. Detail text is never rendered as HTML.
 - Task responses include `completed: boolean` (false for new tasks). The list API
   returns active and archived tasks together; the UI partitions them locally.
   `PUT /tasks/{id}/completion` accepts `{ "completed": true }` to archive or

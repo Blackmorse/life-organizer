@@ -35,6 +35,9 @@ There are three logical app components but initially only two subprojects:
   their planning horizon: Someday, Upcoming (weeks), or Soon (days).
 - **Categories and subcategories:** Hierarchical organization of tasks.
 - **Implementation plans:** Plans describing how to carry out a task.
+- **Detailed descriptions:** Optional plain-text notes on tasks and subtasks,
+  empty by default. Visible only in expanded Mini App details; existing short
+  descriptions remain the names used in lists and Telegram messages.
 - **Subtasks:** Optional ordered steps with descriptions and completion flags,
   managed as a single list. Completed steps stay visible; completing every step
   in a nonempty list automatically completes the parent task.

@@ -8,6 +8,8 @@ through without losing sight of longer-term work.
 
 - **Organize your work:** Group tasks into categories, set their urgency, and
   break them into smaller steps.
+- **Keep extra context:** Add optional detailed notes to tasks and steps, visible
+  when you expand their Mini App details.
 - **Plan your day:** Pick tasks or individual steps for today, plan ahead for
   tomorrow, and decide whether to carry unfinished work forward.
 - **Keep routines and dates in view:** Set recurring tasks and one-time reminders

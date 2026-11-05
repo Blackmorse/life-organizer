@@ -7,6 +7,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import type { Subtask } from '../types'
 import { DailyPickButton } from './DailyTasks'
+import { DetailedDescription } from './DetailedDescription'
 
 export function Subtasks({ taskId, subtasks, disabled, readOnly = false, mode = 'task', onSave, onEditingChange }: {
   taskId: number
@@ -17,7 +18,7 @@ export function Subtasks({ taskId, subtasks, disabled, readOnly = false, mode = 
   onEditingChange?: (editing: boolean) => void
   onSave: (steps: Subtask[]) => Promise<boolean>
 }) {
-  const [draft, updateDraft] = useState<{ index: number | null, description: string } | null>(null)
+  const [draft, updateDraft] = useState<{ index: number | null, description: string, detailed_description: string } | null>(null)
   function setDraft(next: typeof draft) {
     updateDraft(next)
     onEditingChange?.(next !== null)
@@ -35,12 +36,15 @@ export function Subtasks({ taskId, subtasks, disabled, readOnly = false, mode = 
     event.preventDefault()
     if (disabled || readOnly || !draft.description.trim()) return
     const next = draft.index === null
-      ? [...subtasks, { description: draft.description, completed: false }]
-      : subtasks.map((step, index) => index === draft.index ? { ...step, description: draft.description } : step)
+      ? [...subtasks, { description: draft.description, detailed_description: draft.detailed_description, completed: false }]
+      : subtasks.map((step, index) => index === draft.index ? { ...step, description: draft.description, detailed_description: draft.detailed_description } : step)
     if (await onSave(next)) setDraft(null)
   }}>
     <TextField label="Subtask description" autoFocus required multiline fullWidth value={draft.description} disabled={disabled}
       onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+    <TextField label="Subtask detailed description" multiline minRows={3} fullWidth value={draft.detailed_description} disabled={disabled}
+      sx={{ mt: 1 }} helperText="Optional. Shown only in expanded Mini App details."
+      onChange={(event) => setDraft({ ...draft, detailed_description: event.target.value })} />
     <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
       <Button type="submit" variant="contained" size="small" disabled={disabled || !draft.description.trim()}>Save subtask</Button>
       <Button size="small" disabled={disabled} onClick={() => setDraft(null)}>Cancel</Button>
@@ -57,23 +61,24 @@ export function Subtasks({ taskId, subtasks, disabled, readOnly = false, mode = 
         '&::before': { content: 'counter(subtask) "."', typography: 'body2', color: 'text.secondary', pt: '9px', textAlign: 'right' },
       }}>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          {!readOnly && draft?.index === index ? editor : <FormControlLabel label={step.description} sx={{ flex: 1, minWidth: 0, m: 0, alignItems: 'flex-start' }}
+          {!readOnly && draft?.index === index ? editor : <Box sx={{ flex: 1, minWidth: 0 }}><FormControlLabel label={step.description} sx={{ m: 0, alignItems: 'flex-start' }}
             slotProps={{ typography: { variant: 'body2', sx: { pt: '9px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textDecoration: step.completed ? 'line-through' : undefined } } }}
             control={<Checkbox size="small" checked={step.completed} disabled={actionsDisabled || readOnly || mode === 'template'}
               slotProps={{ input: { 'aria-label': `Subtask ${index + 1}: ${step.description}` } }}
-              onChange={(_, completed) => void onSave(subtasks.map((item, position) => position === index ? { ...item, completed } : item))} />} />}
+              onChange={(_, completed) => void onSave(subtasks.map((item, position) => position === index ? { ...item, completed } : item))} />} />
+            <DetailedDescription text={step.detailed_description} /></Box>}
           {!readOnly && <Stack direction="row" sx={{ flexShrink: 0 }}>
             {mode === 'task' && <DailyPickButton taskId={taskId} step={step} index={index} label={step.description} disabled={actionsDisabled} />}
             <IconButton size="small" aria-label={`Move subtask ${index + 1} up`} disabled={actionsDisabled || index === 0} onClick={() => move(index, -1)}><ArrowUpwardIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Move subtask ${index + 1} down`} disabled={actionsDisabled || index === subtasks.length - 1} onClick={() => move(index, 1)}><ArrowDownwardIcon fontSize="small" /></IconButton>
-            <IconButton size="small" aria-label={`Edit subtask ${index + 1}`} disabled={actionsDisabled} onClick={() => setDraft({ index, description: step.description })}><EditOutlinedIcon fontSize="small" /></IconButton>
+            <IconButton size="small" aria-label={`Edit subtask ${index + 1}`} disabled={actionsDisabled} onClick={() => setDraft({ index, description: step.description, detailed_description: step.detailed_description ?? '' })}><EditOutlinedIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Delete subtask ${index + 1}`} disabled={actionsDisabled} onClick={() => void onSave(subtasks.filter((_, position) => position !== index))}><CloseIcon fontSize="small" /></IconButton>
           </Stack>}
         </Stack>
       </Box>)}
     </Box> : <Typography variant="body2" color="text.secondary">No subtasks yet.</Typography>}
     {!readOnly && <>
-      <Button size="small" startIcon={<AddIcon />} disabled={actionsDisabled} onClick={() => setDraft({ index: null, description: '' })}>Add subtask</Button>
+      <Button size="small" startIcon={<AddIcon />} disabled={actionsDisabled} onClick={() => setDraft({ index: null, description: '', detailed_description: '' })}>Add subtask</Button>
       {draft?.index === null && editor}
     </>}
   </Box>

@@ -12,6 +12,8 @@ pub struct BacklogTask {
 #[serde(deny_unknown_fields)]
 pub struct ReminderTaskInput {
     pub description: String,
+    #[serde(default)]
+    pub detailed_description: String,
     /// Exact instant in Unix milliseconds; timezone determines morning calendar dates.
     pub due_at: i64,
     pub timezone: String,
@@ -30,6 +32,8 @@ pub struct ReminderTask {
 #[serde(deny_unknown_fields)]
 pub struct ScheduledTaskInput {
     pub description: String,
+    #[serde(default)]
+    pub detailed_description: String,
     pub weekdays: Vec<i16>,
     pub timezone: String,
     #[serde(default)]
@@ -48,6 +52,8 @@ pub struct ScheduledOccurrence {
     pub id: i64,
     pub scheduled_task_id: i64,
     pub description: String,
+    #[serde(default)]
+    pub detailed_description: String,
     pub subtasks: Vec<Subtask>,
     pub completed: bool,
     pub expires_at: i64,
@@ -100,6 +106,8 @@ pub struct Task {
     pub id: i64,
     pub category_id: i64,
     pub description: String,
+    #[serde(default)]
+    pub detailed_description: String,
     pub urgency: TaskUrgency,
     pub subtasks: Vec<Subtask>,
     pub completed: bool,
@@ -111,6 +119,8 @@ pub struct Subtask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub description: String,
+    #[serde(default)]
+    pub detailed_description: String,
     pub completed: bool,
 }
 
@@ -119,6 +129,7 @@ impl Subtask {
         Self {
             id: None,
             description: description.into(),
+            detailed_description: String::new(),
             completed: false,
         }
     }

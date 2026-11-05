@@ -46,6 +46,7 @@ impl PgScheduledDao {
 struct TemplateRow {
     id: i64,
     description: String,
+    detailed_description: String,
     weekdays: Vec<i16>,
     timezone: String,
     subtasks: Json<Vec<Subtask>>,
@@ -56,6 +57,7 @@ impl TemplateRow {
             id: self.id,
             details: ScheduledTaskInput {
                 description: self.description,
+                detailed_description: self.detailed_description,
                 weekdays: self.weekdays,
                 timezone: self.timezone,
                 subtasks: self.subtasks.0,
@@ -69,6 +71,7 @@ struct OccurrenceRow {
     id: i64,
     scheduled_task_id: i64,
     description: String,
+    detailed_description: String,
     subtasks: Json<Vec<Subtask>>,
     completed: bool,
     expires_at: i64,
@@ -85,7 +88,7 @@ impl ScheduledDao for PgScheduledDao {
         )
     }
     async fn list(&self) -> Result<Vec<ScheduledTask>, DaoError> {
-        sqlx::query_as::<_, TemplateRow>("SELECT id, description, weekdays, timezone, subtasks FROM scheduled_tasks WHERE user_id = $1 ORDER BY id")
+        sqlx::query_as::<_, TemplateRow>("SELECT id, description, detailed_description, weekdays, timezone, subtasks FROM scheduled_tasks WHERE user_id = $1 ORDER BY id")
             .bind(self.user_id).fetch_all(&self.pool).await?.into_iter().map(TemplateRow::entity).collect()
     }
     async fn save(
@@ -94,13 +97,13 @@ impl ScheduledDao for PgScheduledDao {
         input: &ScheduledTaskInput,
     ) -> Result<Option<ScheduledTask>, DaoError> {
         let row = if let Some(id) = id {
-            sqlx::query_as::<_, TemplateRow>("UPDATE scheduled_tasks SET description=$3, weekdays=$4, timezone=$5, subtasks=$6 WHERE id=$1 AND user_id=$2 RETURNING id, description, weekdays, timezone, subtasks")
+            sqlx::query_as::<_, TemplateRow>("UPDATE scheduled_tasks SET description=$3, weekdays=$4, timezone=$5, subtasks=$6, detailed_description=$7 WHERE id=$1 AND user_id=$2 RETURNING id, description, detailed_description, weekdays, timezone, subtasks")
                 .bind(id).bind(self.user_id).bind(&input.description)
-                .bind(&input.weekdays).bind(&input.timezone).bind(Json(&input.subtasks)).fetch_optional(&self.pool).await?
+                .bind(&input.weekdays).bind(&input.timezone).bind(Json(&input.subtasks)).bind(&input.detailed_description).fetch_optional(&self.pool).await?
         } else {
-            sqlx::query_as::<_, TemplateRow>("INSERT INTO scheduled_tasks(user_id, description, weekdays, timezone, subtasks) VALUES ($1,$2,$3,$4,$5) RETURNING id, description, weekdays, timezone, subtasks")
+            sqlx::query_as::<_, TemplateRow>("INSERT INTO scheduled_tasks(user_id, description, weekdays, timezone, subtasks, detailed_description) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, description, detailed_description, weekdays, timezone, subtasks")
                 .bind(self.user_id).bind(&input.description)
-                .bind(&input.weekdays).bind(&input.timezone).bind(Json(&input.subtasks)).fetch_optional(&self.pool).await?
+                .bind(&input.weekdays).bind(&input.timezone).bind(Json(&input.subtasks)).bind(&input.detailed_description).fetch_optional(&self.pool).await?
         };
         row.map(TemplateRow::entity).transpose()
     }
@@ -117,7 +120,7 @@ impl ScheduledDao for PgScheduledDao {
     }
     async fn daily(&self) -> Result<Vec<ScheduledOccurrence>, DaoError> {
         generate_scheduled(&self.pool, Some(self.user_id)).await?;
-        let rows = sqlx::query_as::<_, OccurrenceRow>("SELECT o.id, o.scheduled_task_id, o.description, o.subtasks, o.completed, (extract(epoch FROM o.expires_at)*1000)::bigint AS expires_at FROM scheduled_occurrences o JOIN scheduled_tasks s ON s.id=o.scheduled_task_id WHERE s.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp() ORDER BY o.id")
+        let rows = sqlx::query_as::<_, OccurrenceRow>("SELECT o.id, o.scheduled_task_id, o.description, o.detailed_description, o.subtasks, o.completed, (extract(epoch FROM o.expires_at)*1000)::bigint AS expires_at FROM scheduled_occurrences o JOIN scheduled_tasks s ON s.id=o.scheduled_task_id WHERE s.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp() ORDER BY o.id")
             .bind(self.user_id).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|r| {
@@ -125,6 +128,7 @@ impl ScheduledDao for PgScheduledDao {
                     id: r.id,
                     scheduled_task_id: r.scheduled_task_id,
                     description: r.description,
+                    detailed_description: r.detailed_description,
                     subtasks: r.subtasks.0,
                     completed: r.completed,
                     expires_at: r.expires_at,

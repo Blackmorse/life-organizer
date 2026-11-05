@@ -11,6 +11,7 @@ import { TaskForm } from './TaskForm'
 import { TASK_URGENCIES } from '../urgency'
 import { Subtasks } from './Subtasks'
 import { DailyPickButton } from './DailyTasks'
+import { DetailedDescription } from './DetailedDescription'
 
 export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onReplaceSubtasks, onSetCompleted }: {
   task: Task
@@ -52,6 +53,7 @@ export function TaskCard({ task, categories, disabled, onUpdate, onDelete, onRep
           ) : (
             <>
               <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: 1.7 }}>{task.description}</Typography>
+              <DetailedDescription text={task.detailed_description} />
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>Urgency: {urgency.label} — {urgency.description}</Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>In {category?.description ?? `Category #${task.category_id}`}</Typography>
               <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 1 }}>

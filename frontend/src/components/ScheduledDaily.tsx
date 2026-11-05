@@ -5,6 +5,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import type { ScheduledOccurrence, Subtask } from '../types'
 import { Subtasks } from './Subtasks'
+import { DetailedDescription } from './DetailedDescription'
 
 export function ScheduledDaily({ item, disabled, onComplete, onSubtasks, onDismiss }: {
   item: ScheduledOccurrence, disabled: boolean
@@ -24,6 +25,7 @@ export function ScheduledDaily({ item, disabled, onComplete, onSubtasks, onDismi
       <Tooltip title="Skip today only"><span><IconButton aria-label={`Remove from Tasks of the day: ${item.description}`} disabled={disabled} onClick={() => void onDismiss(item.id)}><CloseIcon /></IconButton></span></Tooltip>
     </Stack>
     <Collapse in={expanded} unmountOnExit sx={{ ml: 3 }}>
+      <DetailedDescription text={item.detailed_description} />
       <Subtasks taskId={item.id} subtasks={item.subtasks} disabled={disabled} mode="occurrence" onSave={(steps) => onSubtasks(item.id, steps)} />
     </Collapse>
   </ListItem>

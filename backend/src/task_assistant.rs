@@ -20,6 +20,20 @@ use sqlx::PgPool;
 use std::{error::Error, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
+/// Detailed descriptions belong only to the Mini App, never model/tool output.
+fn assistant_task(task: &Task) -> Value {
+    json!({
+        "id": task.id, "category_id": task.category_id,
+        "description": task.description, "urgency": task.urgency,
+        "completed": task.completed,
+        "subtasks": task.subtasks.iter().map(|step| {
+            let mut value = json!({"description": step.description, "completed": step.completed});
+            if let Some(id) = &step.id { value["id"] = json!(id); }
+            value
+        }).collect::<Vec<_>>()
+    })
+}
+
 const PROMPT: &str = "You handle typed text and transcribed voice requests for a personal task organizer. \
 Use list_tasks_of_the_day when the user wants today's list or says they finished / want to mark \
 a daily task completed. Before completing, ALWAYS list current work, match the user's meaning \
@@ -376,7 +390,8 @@ impl Tool for AssistantTool {
                     Ok(all) => {
                         let active: Vec<Task> =
                             all.into_iter().filter(|task| !task.completed).collect();
-                        let output = json!({"tasks": active});
+                        let output =
+                            json!({"tasks": active.iter().map(assistant_task).collect::<Vec<_>>()});
                         *self.state.listed_tasks.lock().await = Some(active);
                         output
                     }
@@ -426,7 +441,7 @@ impl Tool for AssistantTool {
                     .await
                 {
                     Ok(task) => {
-                        let output = json!({"created":true, "task":task});
+                        let output = json!({"created":true, "task":assistant_task(&task)});
                         *self.state.outcome.lock().await = Some(Outcome::CreatedTask {
                             task: task.clone(),
                             category: category.description,
@@ -466,7 +481,7 @@ impl Tool for AssistantTool {
                     .await
                 {
                     Ok(updated) => {
-                        let output = json!({"added":true, "task":updated});
+                        let output = json!({"added":true, "task":assistant_task(&updated)});
                         *self.state.outcome.lock().await = Some(Outcome::AddedSubtask {
                             task: updated,
                             category: self
@@ -708,10 +723,24 @@ mod tests {
             id: 42,
             category_id: 7,
             description: "Release <app>".into(),
+            detailed_description: "Mini App only task notes".into(),
             urgency: TaskUrgency::Soon,
             subtasks: vec![Subtask::new("Deploy backend")],
             completed: false,
         }
+    }
+
+    #[test]
+    fn assistant_task_excludes_detailed_descriptions() {
+        let mut task = task();
+        task.subtasks[0].detailed_description = "Mini App only step notes".into();
+        task.subtasks[0].id = Some("17".into());
+        let output = assistant_task(&task);
+        assert_eq!(output["description"], task.description);
+        assert_eq!(output["subtasks"][0]["id"], "17");
+        assert!(output.get("detailed_description").is_none());
+        assert!(output["subtasks"][0].get("detailed_description").is_none());
+        assert!(!output.to_string().contains("Mini App only"));
     }
 
     #[derive(Default)]
@@ -762,7 +791,13 @@ mod tests {
 
     #[async_trait]
     impl TaskDao for TaskStore {
-        async fn create(&self, _: i64, _: &str, _: TaskUrgency) -> Result<Task, DaoError> {
+        async fn create_with_details(
+            &self,
+            _: i64,
+            _: &str,
+            _: TaskUrgency,
+            _: &str,
+        ) -> Result<Task, DaoError> {
             unreachable!()
         }
         async fn create_with_subtasks(
@@ -785,6 +820,7 @@ mod tests {
                 id: 100,
                 category_id,
                 description: description.into(),
+                detailed_description: String::new(),
                 urgency,
                 subtasks: subtasks.to_vec(),
                 completed: false,
@@ -822,12 +858,13 @@ mod tests {
                 Ok(vec![task()])
             }
         }
-        async fn update(
+        async fn update_with_details(
             &self,
             _: i64,
             _: i64,
             _: &str,
             _: TaskUrgency,
+            _: Option<&str>,
         ) -> Result<Option<Task>, DaoError> {
             unreachable!()
         }

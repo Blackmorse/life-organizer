@@ -886,6 +886,7 @@ async fn schedule(db: &TestDb, description: &str) -> i64 {
             None,
             &ScheduledTaskInput {
                 description: description.into(),
+                detailed_description: String::new(),
                 weekdays: vec![1, 2, 3, 4, 5, 6, 7],
                 timezone: "UTC".into(),
                 subtasks: vec![Subtask::new("First step")],

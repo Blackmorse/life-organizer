@@ -13,6 +13,16 @@ pub trait TaskDao: Send + Sync {
         category_id: i64,
         description: &str,
         urgency: TaskUrgency,
+    ) -> Result<Task, DaoError> {
+        self.create_with_details(category_id, description, urgency, "")
+            .await
+    }
+    async fn create_with_details(
+        &self,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        detailed_description: &str,
     ) -> Result<Task, DaoError>;
     /// One atomic INSERT including the step list; steps start unchecked.
     async fn create_with_subtasks(
@@ -38,6 +48,17 @@ pub trait TaskDao: Send + Sync {
         category_id: i64,
         description: &str,
         urgency: TaskUrgency,
+    ) -> Result<Option<Task>, DaoError> {
+        self.update_with_details(id, category_id, description, urgency, None)
+            .await
+    }
+    async fn update_with_details(
+        &self,
+        id: i64,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        detailed_description: Option<&str>,
     ) -> Result<Option<Task>, DaoError>;
     async fn delete(&self, id: i64) -> Result<bool, DaoError>;
     async fn set_completed(&self, id: i64, completed: bool) -> Result<Option<Task>, DaoError>;
@@ -80,19 +101,21 @@ impl PgTaskDao {
 }
 
 fn task(
-    (id, category_id, description, urgency, subtasks, completed): (
+    (id, category_id, description, urgency, subtasks, completed, detailed_description): (
         i64,
         i64,
         String,
         String,
         Json<Vec<Subtask>>,
         bool,
+        String,
     ),
 ) -> Result<Task, DaoError> {
     Ok(Task {
         id,
         category_id,
         description,
+        detailed_description,
         subtasks: subtasks.0,
         completed,
         urgency: TaskUrgency::try_from(urgency.as_str())
@@ -110,17 +133,19 @@ fn write_error(error: sqlx::Error) -> DaoError {
 
 #[async_trait]
 impl TaskDao for PgTaskDao {
-    async fn create(
+    async fn create_with_details(
         &self,
         category_id: i64,
         description: &str,
         urgency: TaskUrgency,
+        detailed_description: &str,
     ) -> Result<Task, DaoError> {
-        let row = sqlx::query_as("INSERT INTO tasks (category_id, description, urgency) SELECT id, $2, $4 FROM categories WHERE id = $1 AND user_id = $3 RETURNING id, category_id, description, urgency, subtasks, completed")
+        let row = sqlx::query_as("INSERT INTO tasks (category_id, description, urgency, detailed_description) SELECT id, $2, $4, $5 FROM categories WHERE id = $1 AND user_id = $3 RETURNING id, category_id, description, urgency, subtasks, completed, detailed_description")
             .bind(category_id)
             .bind(description)
             .bind(self.user_id)
             .bind(urgency.as_str())
+            .bind(detailed_description)
             .fetch_optional(&self.pool)
             .await
             .map_err(write_error)?
@@ -135,7 +160,7 @@ impl TaskDao for PgTaskDao {
         urgency: TaskUrgency,
         subtasks: &[Subtask],
     ) -> Result<Task, DaoError> {
-        let row = sqlx::query_as("INSERT INTO tasks (category_id, description, urgency, subtasks) SELECT id, $2, $4, $5 FROM categories WHERE id = $1 AND user_id = $3 RETURNING id, category_id, description, urgency, subtasks, completed")
+        let row = sqlx::query_as("INSERT INTO tasks (category_id, description, urgency, subtasks) SELECT id, $2, $4, $5 FROM categories WHERE id = $1 AND user_id = $3 RETURNING id, category_id, description, urgency, subtasks, completed, detailed_description")
             .bind(category_id)
             .bind(description)
             .bind(self.user_id)
@@ -169,7 +194,7 @@ impl TaskDao for PgTaskDao {
         steps.push(Subtask::new(description));
         // The appended step is unchecked, so the derived parent state stays active.
         let completed = !steps.is_empty() && steps.iter().all(|step| step.completed);
-        let row = sqlx::query_as("UPDATE tasks t SET subtasks = $3, completed = $4 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed")
+        let row = sqlx::query_as("UPDATE tasks t SET subtasks = $3, completed = $4 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed, detailed_description")
             .bind(id)
             .bind(self.user_id)
             .bind(Json(&steps))
@@ -181,7 +206,7 @@ impl TaskDao for PgTaskDao {
     }
 
     async fn get(&self, id: i64) -> Result<Option<Task>, DaoError> {
-        let row = sqlx::query_as("SELECT t.id, t.category_id, t.description, t.urgency, t.subtasks, t.completed FROM tasks t JOIN categories c ON c.id = t.category_id WHERE t.id = $1 AND c.user_id = $2")
+        let row = sqlx::query_as("SELECT t.id, t.category_id, t.description, t.urgency, t.subtasks, t.completed, t.detailed_description FROM tasks t JOIN categories c ON c.id = t.category_id WHERE t.id = $1 AND c.user_id = $2")
             .bind(id)
             .bind(self.user_id)
             .fetch_optional(&self.pool)
@@ -190,7 +215,7 @@ impl TaskDao for PgTaskDao {
     }
 
     async fn list(&self, category_id: Option<i64>) -> Result<Vec<Task>, DaoError> {
-        let rows = sqlx::query_as("SELECT t.id, t.category_id, t.description, t.urgency, t.subtasks, t.completed FROM tasks t JOIN categories c ON c.id = t.category_id WHERE ($1::bigint IS NULL OR t.category_id = $1) AND c.user_id = $2 ORDER BY t.id")
+        let rows = sqlx::query_as("SELECT t.id, t.category_id, t.description, t.urgency, t.subtasks, t.completed, t.detailed_description FROM tasks t JOIN categories c ON c.id = t.category_id WHERE ($1::bigint IS NULL OR t.category_id = $1) AND c.user_id = $2 ORDER BY t.id")
             .bind(category_id)
             .bind(self.user_id)
             .fetch_all(&self.pool)
@@ -198,12 +223,13 @@ impl TaskDao for PgTaskDao {
         rows.into_iter().map(task).collect()
     }
 
-    async fn update(
+    async fn update_with_details(
         &self,
         id: i64,
         category_id: i64,
         description: &str,
         urgency: TaskUrgency,
+        detailed_description: Option<&str>,
     ) -> Result<Option<Task>, DaoError> {
         // Both the source task and destination category must belong to this user.
         // Enforce them in the write itself, not only in a preceding lookup.
@@ -211,12 +237,13 @@ impl TaskDao for PgTaskDao {
         if !self.lock_active_task(&mut transaction, id).await? {
             return Ok(None);
         }
-        let row = sqlx::query_as("UPDATE tasks t SET category_id = $2, description = $3, urgency = $5 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $4) AND EXISTS (SELECT 1 FROM categories c WHERE c.id = $2 AND c.user_id = $4) RETURNING id, category_id, description, urgency, subtasks, completed")
+        let row = sqlx::query_as("UPDATE tasks t SET category_id = $2, description = $3, urgency = $5, detailed_description = COALESCE($6, detailed_description) WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $4) AND EXISTS (SELECT 1 FROM categories c WHERE c.id = $2 AND c.user_id = $4) RETURNING id, category_id, description, urgency, subtasks, completed, detailed_description")
             .bind(id)
             .bind(category_id)
             .bind(description)
             .bind(self.user_id)
             .bind(urgency.as_str())
+            .bind(detailed_description)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(write_error)?;
@@ -268,7 +295,7 @@ impl TaskDao for PgTaskDao {
         // Empty lists do not complete tasks. Save steps and derived parent state
         // in the same write, under the existing archive/ownership row lock.
         let completed = !subtasks.is_empty() && subtasks.iter().all(|step| step.completed);
-        let row = sqlx::query_as("UPDATE tasks t SET subtasks = $3, completed = $4 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed")
+        let row = sqlx::query_as("UPDATE tasks t SET subtasks = $3, completed = $4 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed, detailed_description")
             .bind(id)
             .bind(self.user_id)
             .bind(Json(subtasks))
@@ -284,7 +311,7 @@ impl TaskDao for PgTaskDao {
     }
 
     async fn set_completed(&self, id: i64, completed: bool) -> Result<Option<Task>, DaoError> {
-        let row = sqlx::query_as("UPDATE tasks t SET completed = $3 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed")
+        let row = sqlx::query_as("UPDATE tasks t SET completed = $3 WHERE t.id = $1 AND EXISTS (SELECT 1 FROM categories c WHERE c.id = t.category_id AND c.user_id = $2) RETURNING id, category_id, description, urgency, subtasks, completed, detailed_description")
             .bind(id)
             .bind(self.user_id)
             .bind(completed)

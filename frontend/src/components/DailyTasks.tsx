@@ -8,6 +8,7 @@ import type { Category, DailyTask, Subtask, Task, ScheduledOccurrence, ReminderT
 import { ScheduledDaily } from './ScheduledDaily'
 import { ReminderDaily } from './ReminderTasks'
 import { reminderDate } from '../reminders'
+import { DetailedDescriptionDisclosure } from './DetailedDescription'
 
 import { DailyContext } from './DailyContext'
 
@@ -78,6 +79,7 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
       <Stack sx={{ flex: 1, minWidth: 0, pt: 1 }}>
         <Typography sx={{ fontWeight: step ? undefined : 600, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textDecoration: task.completed || step?.completed ? 'line-through' : undefined }}>{description}</Typography>
         {!step && <Typography variant="caption" color="text.secondary">{category}</Typography>}
+        <DetailedDescriptionDisclosure text={(step ?? task).detailed_description} label={description} />
       </Stack>
       <IconButton aria-label={`Remove from Tasks of the day: ${description}`} disabled={disabled} onClick={() => void onRemove(task.id, pick.subtask_id)}><CloseIcon /></IconButton>
     </ListItem>
@@ -102,6 +104,7 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
           {wholeTask ? renderPick(wholeTask) : <Stack sx={{ px: 1.5, py: 1 }}>
             <Typography sx={{ fontWeight: 600, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Typography>
             <Typography variant="caption" color="text.secondary">{category}</Typography>
+            <DetailedDescriptionDisclosure text={task.detailed_description} label={task.description} />
           </Stack>}
           {steps.length > 0 && <List disablePadding aria-label={`Selected subtasks for ${task.description}`} sx={{ ml: { xs: 2, sm: 4 }, pl: 1, borderLeft: 1, borderColor: 'divider' }}>
             {steps.map(renderPick)}

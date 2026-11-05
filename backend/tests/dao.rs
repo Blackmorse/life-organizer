@@ -220,6 +220,7 @@ async fn voice_creation_writes_steps_atomically_and_appends_preserve_identity() 
             Subtask {
                 id: Some("17".into()),
                 description: "Build".into(),
+                detailed_description: String::new(),
                 completed: false,
             },
             Subtask::new("Deploy"),

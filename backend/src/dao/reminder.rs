@@ -31,6 +31,7 @@ impl PgReminderDao {
 struct ReminderRow {
     id: i64,
     description: String,
+    detailed_description: String,
     due_at: i64,
     timezone: String,
     completed: bool,
@@ -42,6 +43,7 @@ impl From<ReminderRow> for ReminderTask {
             id: r.id,
             details: ReminderTaskInput {
                 description: r.description,
+                detailed_description: r.detailed_description,
                 due_at: r.due_at,
                 timezone: r.timezone,
             },
@@ -50,7 +52,7 @@ impl From<ReminderRow> for ReminderTask {
         }
     }
 }
-const COLUMNS: &str = "id, description, (extract(epoch FROM due_at)*1000)::bigint AS due_at, timezone, completed, CASE WHEN selected_until > statement_timestamp() THEN (extract(epoch FROM selected_until)*1000)::bigint END AS expires_at";
+const COLUMNS: &str = "id, description, detailed_description, (extract(epoch FROM due_at)*1000)::bigint AS due_at, timezone, completed, CASE WHEN selected_until > statement_timestamp() THEN (extract(epoch FROM selected_until)*1000)::bigint END AS expires_at";
 
 #[async_trait]
 impl ReminderDao for PgReminderDao {
@@ -73,11 +75,11 @@ impl ReminderDao for PgReminderDao {
         let row = if let Some(id) = id {
             sqlx::query_as::<_, ReminderRow>(&format!("UPDATE reminder_tasks SET description=$3,
                 selected_until=CASE WHEN due_at <> to_timestamp($4::double precision/1000) OR timezone <> $5 THEN NULL ELSE selected_until END,
-                due_at=to_timestamp($4::double precision/1000), timezone=$5 WHERE id=$1 AND user_id=$2 RETURNING {COLUMNS}"))
-                .bind(id).bind(self.user_id).bind(&input.description).bind(input.due_at).bind(&input.timezone).fetch_optional(&self.pool).await?
+                due_at=to_timestamp($4::double precision/1000), timezone=$5, detailed_description=$6 WHERE id=$1 AND user_id=$2 RETURNING {COLUMNS}"))
+                .bind(id).bind(self.user_id).bind(&input.description).bind(input.due_at).bind(&input.timezone).bind(&input.detailed_description).fetch_optional(&self.pool).await?
         } else {
-            sqlx::query_as::<_, ReminderRow>(&format!("INSERT INTO reminder_tasks(user_id, description, due_at, timezone) VALUES ($1,$2,to_timestamp($3::double precision/1000),$4) RETURNING {COLUMNS}"))
-                .bind(self.user_id).bind(&input.description).bind(input.due_at).bind(&input.timezone).fetch_optional(&self.pool).await?
+            sqlx::query_as::<_, ReminderRow>(&format!("INSERT INTO reminder_tasks(user_id, description, due_at, timezone, detailed_description) VALUES ($1,$2,to_timestamp($3::double precision/1000),$4,$5) RETURNING {COLUMNS}"))
+                .bind(self.user_id).bind(&input.description).bind(input.due_at).bind(&input.timezone).bind(&input.detailed_description).fetch_optional(&self.pool).await?
         };
         Ok(row.map(Into::into))
     }

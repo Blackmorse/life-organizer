@@ -76,6 +76,161 @@ async fn request_as(
 }
 
 #[tokio::test]
+async fn detailed_descriptions_round_trip_default_clear_and_follow_task_guards() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let sender = std::sync::Arc::new(RecordingSender::default());
+    let app = db.app_with_sender(sender.clone());
+    let input = json!({"category_id":category.id,"description":"Build","urgency":"soon"});
+    let (status, task) = request(&app, "POST", "/tasks", Some(input.clone())).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(task["detailed_description"], "");
+    let path = format!("/tasks/{}", task["id"].as_i64().unwrap());
+    let notes = "First line\n<script>plain text</script> 📝";
+    let mut detailed = input.clone();
+    detailed["detailed_description"] = json!(notes);
+    let (status, updated) = request(&app, "PUT", &path, Some(detailed.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["detailed_description"], notes);
+    // A legacy edit/move omitting notes preserves them.
+    assert_eq!(
+        request(&app, "PUT", &path, Some(input.clone())).await.1["detailed_description"],
+        notes
+    );
+    let steps = json!({"subtasks":[
+        {"description":"Design","detailed_description":"Private step notes","completed":false},
+        {"description":"Ship","completed":false}
+    ]});
+    let (_, updated) = request(&app, "PUT", &format!("{path}/subtasks"), Some(steps)).await;
+    assert_eq!(
+        updated["subtasks"][0]["detailed_description"],
+        "Private step notes"
+    );
+    assert_eq!(updated["subtasks"][1]["detailed_description"], "");
+    request(
+        &app,
+        "POST",
+        "/daily-tasks",
+        Some(json!({"task_id":task["id"],"timezone":"UTC"})),
+    )
+    .await;
+    let (_, selected) = request(&db.app(), "GET", &path, None).await;
+    let mut reordered = selected["subtasks"].as_array().unwrap().clone();
+    reordered.reverse();
+    let (_, updated) = request(
+        &app,
+        "PUT",
+        &format!("{path}/subtasks"),
+        Some(json!({"subtasks":reordered})),
+    )
+    .await;
+    assert_eq!(
+        updated["subtasks"][1]["detailed_description"],
+        "Private step notes"
+    );
+    assert_eq!(updated["subtasks"][1]["id"], selected["subtasks"][0]["id"]);
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks/finalize", None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let messages = sender.deliveries.lock().unwrap()[0].1.join("\n");
+    assert!(messages.contains("Design"));
+    assert!(!messages.contains("Private step notes"));
+    assert!(!messages.contains("First line"));
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "PUT",
+            &path,
+            Some(detailed.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    request(
+        &app,
+        "PUT",
+        &format!("{path}/completion"),
+        Some(json!({"completed":true})),
+    )
+    .await;
+    assert_eq!(
+        request(&app, "PUT", &path, Some(detailed.clone())).await.0,
+        StatusCode::CONFLICT
+    );
+    let (_, archived) = request(&db.app(), "GET", &path, None).await;
+    assert_eq!(archived["detailed_description"], notes);
+    request(
+        &app,
+        "PUT",
+        &format!("{path}/completion"),
+        Some(json!({"completed":false})),
+    )
+    .await;
+    detailed["detailed_description"] = json!("");
+    assert_eq!(
+        request(&app, "PUT", &path, Some(detailed)).await.1["detailed_description"],
+        ""
+    );
+
+    // Category-free task APIs share the optional field and support explicit clearing.
+    for (route, mut input) in [
+        (
+            "/scheduled-tasks",
+            json!({"description":"Routine","weekdays":[1,2,3,4,5,6,7],"timezone":"UTC"}),
+        ),
+        (
+            "/reminder-tasks",
+            json!({"description":"Appointment","due_at":1804516200000_i64,"timezone":"UTC"}),
+        ),
+    ] {
+        let (status, task) = request(&app, "POST", route, Some(input.clone())).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(task["detailed_description"], "");
+        let path = format!("{route}/{}", task["id"].as_i64().unwrap());
+        input["detailed_description"] = json!(notes);
+        assert_eq!(
+            request(&app, "PUT", &path, Some(input.clone())).await.1["detailed_description"],
+            notes
+        );
+        assert_eq!(
+            request(&db.app(), "GET", route, None).await.1[0]["detailed_description"],
+            notes
+        );
+        input["detailed_description"] = json!("");
+        assert_eq!(
+            request(&app, "PUT", &path, Some(input)).await.1["detailed_description"],
+            ""
+        );
+    }
+
+    for payload in [
+        json!({"category_id":category.id,"description":"Bad","detailed_description":42}),
+        json!({"category_id":category.id,"description":"Bad","detailed_description":{}}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tasks")
+                    .header(
+                        "authorization",
+                        support::authorization_for(support::TELEGRAM_ID),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+#[tokio::test]
 async fn tomorrow_selection_is_independent_persistent_scoped_and_validated() {
     let db = TestDb::new().await;
     let category = db.category_service().create("Work").await.unwrap();
@@ -643,8 +798,8 @@ async fn subtask_completion_automatically_archives_parent_only_for_a_nonempty_fi
     let completion_path = format!("{path}/completion");
     let steps = |first, second| {
         json!([
-            {"description": "Design", "completed": first},
-            {"description": "Build", "completed": second},
+            {"description": "Design", "detailed_description": "", "completed": first},
+            {"description": "Build", "detailed_description": "", "completed": second},
         ])
     };
     for (first, second, completed) in [
@@ -714,9 +869,9 @@ async fn subtask_completion_automatically_archives_parent_only_for_a_nonempty_fi
     );
     // Text edits/reorder keep completion flags; new steps start unfinished.
     let reordered = json!([
-        {"description": "Build edited", "completed": true},
-        {"description": "Design", "completed": false},
-        {"description": "Test", "completed": false},
+        {"description": "Build edited", "detailed_description": "", "completed": true},
+        {"description": "Design", "detailed_description": "", "completed": false},
+        {"description": "Test", "detailed_description": "", "completed": false},
     ]);
     let (_, updated) = request(
         &app,
@@ -728,7 +883,8 @@ async fn subtask_completion_automatically_archives_parent_only_for_a_nonempty_fi
     assert_eq!(updated["subtasks"], reordered);
     assert_eq!(updated["completed"], false);
     // Deleting unfinished steps also completes a nonempty remaining finished list.
-    let remaining = json!([{"description": "Build edited", "completed": true}]);
+    let remaining =
+        json!([{"description": "Build edited", "detailed_description": "", "completed": true}]);
     let (status, archived) = request(
         &app,
         "PUT",

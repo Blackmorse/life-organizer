@@ -44,7 +44,7 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = [], 
         if (method === 'GET') {
           for (const task of scheduled) {
             if (!skipped.has(task.id) && !occurrences.some((item) => item.scheduled_task_id === task.id)) occurrences.push({
-              id: nextId++, scheduled_task_id: task.id, description: task.description,
+              id: nextId++, scheduled_task_id: task.id, description: task.description, detailed_description: task.detailed_description,
               subtasks: task.subtasks.map((step) => ({ ...step, completed: false })), completed: false, expires_at: Date.now() + 86_400_000,
             })
           }
@@ -158,6 +158,63 @@ describe('workspace', () => {
     await user.click(await screen.findByRole('menuitem', { name: action }))
   }
 
+  it('edits optional task and step details, retains failed drafts, and shows notes only after expansion', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [{
+      id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false,
+      detailed_description: 'Existing task notes',
+      subtasks: [{ id: '17', description: 'Design', detailed_description: 'Existing step notes', completed: true }, { id: '18', description: 'Ship', completed: false }],
+    }])
+    const user = userEvent.setup()
+    renderWorkspace()
+    const disclosure = await screen.findByRole('button', { name: 'View task Build' })
+    expect(screen.getByText('Existing task notes')).not.toBeVisible()
+    expect(screen.getByText('Existing step notes')).not.toBeVisible()
+    await user.click(disclosure)
+    expect(screen.getByText('Existing task notes')).toBeVisible()
+    expect(screen.getByText('Existing step notes')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Edit task Build' }))
+    const notes = screen.getByRole('textbox', { name: 'Detailed description' })
+    expect(notes).toHaveValue('Existing task notes')
+    await user.clear(notes)
+    await user.type(notes, 'New task notes{enter}<b>plain text</b>')
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(notes).toHaveValue('New task notes\n<b>plain text</b>')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(screen.getByText(/New task notes/)).toHaveTextContent('<b>plain text</b>')
+    await user.click(screen.getByRole('button', { name: 'Edit subtask 1' }))
+    const stepNotes = screen.getByRole('textbox', { name: 'Subtask detailed description' })
+    expect(stepNotes).toHaveValue('Existing step notes')
+    await user.clear(stepNotes)
+    await user.type(stepNotes, 'Revised step notes')
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(screen.getByRole('button', { name: 'Save subtask' }))
+    expect(stepNotes).toHaveValue('Revised step notes')
+    await user.click(screen.getByRole('button', { name: 'Save subtask' }))
+    const write = fetchMock.mock.calls.filter(([url, options]) => url === '/api/tasks/1/subtasks' && options?.method === 'PUT').at(-1)!
+    expect(JSON.parse(String(write[1]?.body)).subtasks[0]).toEqual({ id: '17', description: 'Design', completed: true, detailed_description: 'Revised step notes' })
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+    expect(screen.getByText('Revised step notes')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.queryByText('Revised step notes')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'View details for Design' }))
+    expect(await screen.findByText('Revised step notes')).toBeVisible()
+    await user.click(screen.getByRole('tab', { name: 'Active' }))
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    await user.click(screen.getByRole('button', { name: 'Edit task Build' }))
+    await user.clear(screen.getByRole('textbox', { name: 'Detailed description' }))
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(screen.queryByText(/New task notes/)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Complete task Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Archive' }))
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    expect(screen.getByText('Revised step notes')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Edit subtask 1' })).not.toBeInTheDocument()
+  })
+
   it('plans tasks and individual steps for tomorrow independently of today and persists toggles', async () => {
     const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
       { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [{ description: 'Design', completed: false }, { description: 'Ship', completed: false }] },
@@ -210,21 +267,27 @@ describe('workspace', () => {
     expect(screen.queryByRole('combobox', { name: 'Urgency' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save reminder' })).toBeDisabled()
     await user.type(screen.getByRole('textbox', { name: 'Reminder description' }), 'Dentist appointment')
+    expect(screen.getByRole('textbox', { name: 'Detailed description' })).toHaveValue('')
     fireEvent.change(screen.getByLabelText(/Date and time/), { target: { value: '2027-03-08T15:30' } })
     await user.click(screen.getByRole('button', { name: 'Save reminder' }))
     await screen.findByText('Dentist appointment')
     const create = fetchMock.mock.calls.find(([url, options]) => url === '/api/reminder-tasks' && options?.method === 'POST')!
-    expect(JSON.parse(String(create[1]?.body))).toEqual({ description: 'Dentist appointment', due_at: new Date('2027-03-08T15:30').getTime(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    expect(JSON.parse(String(create[1]?.body))).toEqual({ description: 'Dentist appointment', detailed_description: '', due_at: new Date('2027-03-08T15:30').getTime(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
     await user.click(screen.getByRole('button', { name: 'Edit reminder' }))
     const field = screen.getByRole('textbox', { name: 'Reminder description' })
     await user.clear(field)
     await user.type(field, 'Dentist checkup')
+    await user.type(screen.getByRole('textbox', { name: 'Detailed description' }), 'Bring insurance card')
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
     await user.click(screen.getByRole('button', { name: 'Save reminder' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('The API is unavailable')
     expect(field).toHaveValue('Dentist checkup')
+    expect(screen.getByRole('textbox', { name: 'Detailed description' })).toHaveValue('Bring insurance card')
     await user.click(screen.getByRole('button', { name: 'Save reminder' }))
     await screen.findByText('Dentist checkup')
+    expect(screen.queryByText('Bring insurance card')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'View details for Dentist checkup' }))
+    expect(await screen.findByText('Bring insurance card')).toBeVisible()
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     expect(screen.queryByText('Dentist checkup')).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'Reminder tasks' }))
@@ -266,12 +329,14 @@ describe('workspace', () => {
     await user.click(screen.getByRole('tab', { name: 'Scheduled tasks' }))
     await user.click(screen.getByRole('button', { name: 'Add scheduled task' }))
     await user.type(screen.getByRole('textbox', { name: 'Scheduled task description' }), 'Sport exercises')
+    await user.type(screen.getByRole('textbox', { name: 'Detailed description' }), 'Routine notes')
     expect(screen.queryByRole('combobox', { name: 'Urgency' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save schedule' })).toBeDisabled()
     for (const day of ['Monday', 'Wednesday', 'Friday']) await user.click(screen.getByRole('checkbox', { name: day }))
     await user.click(screen.getByRole('button', { name: 'Add subtask' }))
     expect(screen.getByRole('button', { name: 'Save schedule' })).toBeDisabled()
     await user.type(screen.getByRole('textbox', { name: 'Subtask description' }), 'Warm up')
+    await user.type(screen.getByRole('textbox', { name: 'Subtask detailed description' }), 'Five minutes')
     await user.click(screen.getByRole('button', { name: 'Save subtask' }))
     await user.click(screen.getByRole('button', { name: 'Save schedule' }))
     await screen.findByRole('button', { name: 'View scheduled task Sport exercises' })
@@ -280,9 +345,14 @@ describe('workspace', () => {
     expect(payload.weekdays).toEqual([1, 3, 5])
     expect(payload).not.toHaveProperty('category_id')
     expect(payload).not.toHaveProperty('urgency')
-    expect(payload.subtasks).toEqual([{ description: 'Warm up', completed: false }])
+    expect(payload.detailed_description).toBe('Routine notes')
+    expect(payload.subtasks).toEqual([{ description: 'Warm up', detailed_description: 'Five minutes', completed: false }])
+    expect(screen.queryByText('Routine notes')).not.toBeInTheDocument()
+    expect(screen.queryByText('Five minutes')).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     await user.click(screen.getByRole('button', { name: 'View daily scheduled task Sport exercises' }))
+    expect(await screen.findByText('Routine notes')).toBeVisible()
+    expect(screen.getByText('Five minutes')).toBeVisible()
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
     await user.click(screen.getByRole('checkbox', { name: 'Subtask 1: Warm up' }))
     expect(await screen.findByRole('alert')).toBeInTheDocument()
@@ -820,7 +890,7 @@ describe('workspace', () => {
     await user.click(lastStep())
     await waitFor(() => expect(screen.queryByRole('button', { name: 'View task Build app' })).not.toBeInTheDocument())
     expect(fetchMock).toHaveBeenCalledWith('/api/tasks/1/subtasks', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ subtasks: [
-      { description: 'Build', completed: true }, { description: 'Design revised', completed: true },
+      { description: 'Build', completed: true }, { description: 'Design revised', completed: true, detailed_description: '' },
     ] }) }))
     await user.click(screen.getByRole('tab', { name: 'Archive' }))
     await user.click(screen.getByRole('button', { name: 'Refresh' }))

@@ -23,9 +23,23 @@ impl TaskService {
         description: &str,
         urgency: TaskUrgency,
     ) -> Result<Task, ServiceError> {
+        self.create_with_details(category_id, description, urgency, "")
+            .await
+    }
+
+    pub async fn create_with_details(
+        &self,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        detailed_description: &str,
+    ) -> Result<Task, ServiceError> {
         validate_id(category_id)?;
         validate_description(description)?;
-        Ok(self.dao.create(category_id, description, urgency).await?)
+        Ok(self
+            .dao
+            .create_with_details(category_id, description, urgency, detailed_description)
+            .await?)
     }
 
     /// Voice creation path: task and its initial steps land in one atomic write.
@@ -83,11 +97,23 @@ impl TaskService {
         description: &str,
         urgency: TaskUrgency,
     ) -> Result<Task, ServiceError> {
+        self.update_with_details(id, category_id, description, urgency, None)
+            .await
+    }
+
+    pub async fn update_with_details(
+        &self,
+        id: i64,
+        category_id: i64,
+        description: &str,
+        urgency: TaskUrgency,
+        detailed_description: Option<&str>,
+    ) -> Result<Task, ServiceError> {
         validate_id(id)?;
         validate_id(category_id)?;
         validate_description(description)?;
         self.dao
-            .update(id, category_id, description, urgency)
+            .update_with_details(id, category_id, description, urgency, detailed_description)
             .await?
             .ok_or(ServiceError::NotFound("task"))
     }

@@ -25,6 +25,7 @@ impl backend::service::MessageSender for Sender {
 fn input() -> ScheduledTaskInput {
     ScheduledTaskInput {
         description: "Sport exercises".into(),
+        detailed_description: String::new(),
         weekdays: vec![1, 2, 3, 4, 5, 6, 7],
         timezone: "Europe/Berlin".into(),
         subtasks: vec![Subtask::new("Warm up"), Subtask::new("Run")],
@@ -43,6 +44,45 @@ async fn accept_scheduled(db: &TestDb) {
     let id: i64 = sqlx::query_scalar("UPDATE morning_offers SET due_at = statement_timestamp() - interval '1 second' RETURNING id")
         .fetch_one(&db.pool).await.unwrap();
     store.decide(id, support::TELEGRAM_ID, true).await.unwrap();
+}
+
+#[tokio::test]
+async fn detailed_descriptions_snapshot_with_steps_and_survive_progress() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    let mut value = input();
+    value.detailed_description = "Template notes".into();
+    value.subtasks[0].detailed_description = "Step notes".into();
+    let template = svc.save(None, value.clone()).await.unwrap();
+    assert_eq!(svc.list().await.unwrap()[0], template);
+    accept_scheduled(&db).await;
+    let occurrence = svc.daily().await.unwrap().remove(0);
+    assert_eq!(occurrence.detailed_description, "Template notes");
+    assert_eq!(occurrence.subtasks[0].detailed_description, "Step notes");
+    value.detailed_description = "Future notes".into();
+    value.subtasks[0].detailed_description.clear();
+    svc.save(Some(template.id), value).await.unwrap();
+    let updated = svc
+        .progress(occurrence.id, Some(true), None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        updated.detailed_description,
+        occurrence.detailed_description
+    );
+    assert_eq!(updated.subtasks, occurrence.subtasks);
+    let messages = PgDailyDao::new(db.pool.clone(), db.user.id)
+        .summary()
+        .await
+        .unwrap();
+    assert!(messages.iter().all(|row| {
+        !row.task.contains("notes")
+            && row
+                .subtask
+                .as_ref()
+                .is_none_or(|step| !step.contains("notes"))
+    }));
 }
 
 #[tokio::test]
@@ -434,7 +474,9 @@ async fn removing_urgency_preserves_existing_schedules_and_daily_progress() {
 async fn morning_opt_in_migration_preserves_existing_daily_progress_but_not_future_selection() {
     let db = TestDb::new_at_version(10).await;
     let svc = service(&db, db.user.id);
-    svc.save(None, input()).await.unwrap();
+    // Seed the version-10 shape directly; the current DAO includes newer columns.
+    sqlx::query("INSERT INTO scheduled_tasks(user_id, description, weekdays, timezone, subtasks) VALUES ($1, 'Sport exercises', ARRAY[1,2,3,4,5,6,7]::smallint[], 'Europe/Berlin', '[{\"description\":\"Warm up\",\"completed\":false},{\"description\":\"Run\",\"completed\":false}]')")
+        .bind(db.user.id).execute(&db.pool).await.unwrap();
     backend::dao::generate_scheduled(&db.pool, None)
         .await
         .unwrap();
