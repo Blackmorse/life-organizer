@@ -17,7 +17,8 @@ through without losing sight of longer-term work.
 - **Track progress:** Complete tasks and steps, with finished tasks kept in an
   archive.
 - **Stay connected through Telegram:** Receive daily summaries and morning
-  planning prompts, check your list, and mark daily work complete by voice.
+  planning prompts, check your list, mark daily work complete, and plan existing
+  tasks or steps for today, tomorrow, or a chosen future date by voice or text.
 
 ## How you use it
 

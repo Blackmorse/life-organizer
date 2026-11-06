@@ -37,7 +37,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Private-chat voice messages are transcribed through a provider-neutral
   `SpeechRecognizer`, currently backed by a custom `langchain-rust` OpenAI tool.
   A LangChain tool-calling assistant can list today's work, complete a requested
-  task/subtask, move daily work, and create ordinary tasks or append subtasks; `OPENAI_KEY` is
+  task/subtask, move daily work, plan existing ordinary tasks for today or future dates,
+  and create ordinary tasks or append subtasks; `OPENAI_KEY` is
   required at startup for transcription and chat.
 - Daily-list finalization sends a summary to the verified user's private Telegram
   chat through the existing bot token, using reqwest with rustls. A background
@@ -320,14 +321,29 @@ morning delivery, live filtering, Yes/No acceptance, expiry and downtime rules a
 Reminder moves update `due_at` and clear selection atomically; ordinary reminder
 day-before notices and same-day offers apply, and old date snapshots cannot accept.
 
-`move_task_of_the_day({"id":"...","date":"tomorrow"})` is the seventh assistant
-tool. It requires an exact ID returned by this message's daily listing and explicit
+`move_task_of_the_day({"id":"...","date":"tomorrow"})` requires an exact ID
+returned by this message's daily listing and explicit
 move intent. An explicit future `YYYY-MM-DD` is also accepted; ambiguous relative
 dates require clarification rather than guessed dates, years or timezones. Success
 uses server-backed confirmation with target date/timezone and the updated daily list.
 
+`add_task_to_day({"task_id":1,"date":"today"})` selects an existing ordinary task
+from this message's `list_active_tasks` output. Optional `subtask_index` selects
+one zero-based step; omission selects all current steps, or the parent when no
+steps exist. `date` accepts `today`, `tomorrow`, or a future `YYYY-MM-DD`. Today
+selects immediately and replies with the updated shared daily summary. Future
+planning preserves today's picks and progress and uses the existing 08:00 Yes/No
+offer flow; confirmation names the resolved date and timezone without a daily report.
+The tool reuses `PgDailyDao` selection through `DailyPlanningService`, checking
+ownership, active state, listed name/category, and step order/IDs/descriptions
+under the task row lock. Stale targets require a fresh listing. Optional `timezone`
+accepts an explicitly supplied IANA name; otherwise the backend uses latest daily
+pick history, then future picks, morning offers, scheduled tasks, reminders, and
+UTC fallback. Dates and timezone rules reuse the API's calendar validation.
+
 Send a text or recorded voice message in the bot's private chat to list today's work,
-mark a named task/subtask completed, move selected work to a future date, create a new ordinary task with optional steps,
+mark a named task/subtask completed, add existing ordinary work to today or a future plan,
+move selected work to a future date, create a new ordinary task with optional steps,
 or add a step to an existing active task. Nonblank text that does not start with `/`
 (after leading whitespace) goes directly to the same `VoiceAssistant` used after
 transcription, with the original text and verified sender. Text needs no audio
@@ -354,7 +370,7 @@ Audio, transcripts, provider response bodies, and credentials are not logged.
 
 For typed text or after transcription, `VoiceAssistant` resolves the user from the Telegram sender
 and starts an independent `langchain-rust` conversation using OpenAI `gpt-4o-mini`
-and the same `OPENAI_KEY`. The model receives seven native function tools:
+and the same `OPENAI_KEY`. The model receives eight native function tools:
 
 - `list_tasks_of_the_day({})` returns all current daily work with task name,
   category, optional step, completion flag and exact string ID. Namespaces are
@@ -369,6 +385,11 @@ and the same `OPENAI_KEY`. The model receives seven native function tools:
 - `list_categories({})` returns all owned categories with numeric IDs and names.
 - `list_active_tasks({})` returns all owned non-archived ordinary tasks with
   numeric IDs, category IDs, urgency and current subtasks.
+- `add_task_to_day({"task_id":1,"date":"tomorrow","subtask_index":0})` plans
+  a listed ordinary task/step for today, tomorrow, or a future explicit date.
+  `subtask_index` and explicit IANA `timezone` are optional. The prompt requires
+  category/task listings and explicit selection intent, and distinguishes selecting
+  existing work from creating new tasks and moving current daily picks.
 - `create_task({"category_id":1,"description":"...","urgency":"soon","subtasks":["step",...]})`
   creates one ordinary task in a category whose ID came from `list_categories`
   in this message. Urgency is `soon`/`upcoming`/`someday` and defaults to
@@ -407,7 +428,7 @@ lost reply, check `/today` for completion changes and the Mini App's task/catego
 list for created tasks or added subtasks before retrying; new work need not appear
 in `/today`. Error replies include both recovery paths. A read-only reply states
 that no tasks changed.
-Each message can complete, create, or move one item; clarification requires another text or voice message
+Each message can complete, create, move, or plan one item; clarification requires another text or voice message
 with the full task name/category (no conversation history is stored). Audio,
 typed text, transcripts and tool results stay in memory, though OpenAI receives the request text
 and listed daily task data to resolve requests. Tests use local model mocks and

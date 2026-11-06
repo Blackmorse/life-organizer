@@ -14,7 +14,7 @@ mod user;
 pub use scheduled::{PgScheduledDao, ScheduledDao, generate_scheduled};
 
 pub use category::{CategoryDao, PgCategoryDao};
-pub use daily::{DailyDao, PgDailyDao};
+pub use daily::{DailyDao, DailyPlanningDao, PgDailyDao};
 pub use task::{PgTaskDao, TaskDao};
 pub use user::PgUserDao;
 

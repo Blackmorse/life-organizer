@@ -137,6 +137,15 @@ Example requests: “What are my tasks for today?”, “Mark buy groceries comp
 buy groceries to Home with steps milk and bread.” Transcripts are not persisted.
 See the backend guide for integration details.
 
+Voice/text requests can also select an existing ordinary task or step for today,
+tomorrow, or an explicit future date through `add_task_to_day`. The assistant lists
+categories and active tasks before choosing a target; writes recheck the listed
+name, category and step identities/order under lock. Today adds immediately and
+sends the shared daily summary. Future plans preserve today's picks and use the
+existing 08:00 Yes/No flow. Timezone comes from saved user history (UTC fallback)
+unless explicitly supplied. Example: “Add buy groceries from Home to today” or
+“Plan the deploy backend step in Release, category Work, for 2027-02-03.”
+
 After the 08:00 setup, the bot reminds users of unfinished ordinary tasks outside
 Tasks of the day, ordered Soon → Upcoming → Someday. A Yes/No offer waits for the
 user's decision; mornings without an actionable offer send the reminder directly.

@@ -7,7 +7,7 @@ pub use daily_work::DailyWorkService;
 mod reminder;
 pub use reminder::ReminderService;
 mod notification;
-pub use daily::DailyService;
+pub use daily::{DailyPlanningService, DailyService};
 pub use notification::{MessageSender, NotificationError};
 mod scheduled;
 mod task;

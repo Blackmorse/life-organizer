@@ -3,7 +3,7 @@ mod support;
 
 use backend::{
     dao::{
-        DailyDao, PgDailyDao, PgUserDao, TaskDao,
+        DailyDao, DailyPlanningDao, PgDailyDao, PgUserDao, TaskDao,
         daily_work::{DailyWork, DailyWorkDao, PgDailyWorkDao},
     },
     domain::{Subtask, TaskUrgency},
@@ -14,6 +14,202 @@ use support::TestDb;
 
 fn find(items: &[DailyWork], id: &str) -> DailyWork {
     items.iter().find(|item| item.id == id).unwrap().clone()
+}
+
+#[tokio::test]
+async fn planning_existing_tasks_reuses_selection_and_preserves_today_and_progress() {
+    use backend::planning;
+    use chrono::{Duration, Utc};
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Release", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    let mut done = Subtask::new("Built");
+    done.completed = true;
+    let task = db
+        .task_service()
+        .replace_subtasks(task.id, &[done, Subtask::new("Deploy")])
+        .await
+        .unwrap();
+    let daily = PgDailyDao::new(db.pool.clone(), db.user.id);
+    let selected = daily
+        .plan(&task, None, "today", Some("Europe/Berlin"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.timezone, "Europe/Berlin");
+    let current = db.task_service().get(task.id).await.unwrap();
+    assert!(current.subtasks[0].completed);
+    assert!(!current.subtasks[1].completed);
+    assert!(current.subtasks.iter().all(|step| step.id.is_some()));
+    let picks = daily.list().await.unwrap();
+    assert_eq!(picks.len(), 2);
+    daily
+        .plan(&current, None, "today", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(daily.list().await.unwrap()).unwrap(),
+        serde_json::to_value(&picks).unwrap()
+    );
+
+    let result = daily
+        .plan(&current, Some(1), "tomorrow", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.timezone, "Europe/Berlin");
+    let zone = planning::zone(&result.timezone).unwrap();
+    assert_eq!(
+        result.date,
+        (Utc::now().with_timezone(&zone).date_naive() + Duration::days(1)).to_string()
+    );
+    let day = Utc::now().with_timezone(&zone).date_naive() + Duration::days(10);
+    let result = daily
+        .plan(&current, Some(1), &day.to_string(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.date, day.to_string());
+    let future: Vec<(String, chrono::DateTime<Utc>)> =
+        sqlx::query_as("SELECT subtask_id,expires_at FROM tomorrow_tasks WHERE task_id=$1")
+            .bind(task.id)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        future,
+        [(
+            current.subtasks[1].id.clone().unwrap(),
+            planning::at(zone, day, 2)
+        )]
+    );
+    assert_eq!(
+        serde_json::to_value(daily.list().await.unwrap()).unwrap(),
+        serde_json::to_value(&picks).unwrap()
+    );
+    assert_eq!(db.task_service().get(task.id).await.unwrap(), current);
+}
+
+#[tokio::test]
+async fn planning_rejects_stale_foreign_archived_and_invalid_requests_without_writes() {
+    use backend::dao::DaoError;
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Release", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    let task = db
+        .task_service()
+        .replace_subtasks(task.id, &[Subtask::new("Deploy"), Subtask::new("Test")])
+        .await
+        .unwrap();
+    let daily = PgDailyDao::new(db.pool.clone(), db.user.id);
+    for (date, timezone) in [
+        ("yesterday", "UTC"),
+        ("2020-01-01", "UTC"),
+        ("9999-01-01", "UTC"),
+        ("tomorrow", "Mars/Olympus"),
+    ] {
+        assert!(matches!(
+            daily.plan(&task, None, date, Some(timezone)).await,
+            Err(DaoError::InvalidMove(_))
+        ));
+    }
+    assert!(
+        daily
+            .plan(&task, Some(9), "today", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let foreign = PgUserDao::new(db.pool.clone())
+        .get_or_create(987654)
+        .await
+        .unwrap();
+    assert!(
+        PgDailyDao::new(db.pool.clone(), foreign.id)
+            .plan(&task, None, "today", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Reordered steps without stable IDs must never select a different step.
+    db.task_service()
+        .replace_subtasks(task.id, &[Subtask::new("Test"), Subtask::new("Deploy")])
+        .await
+        .unwrap();
+    assert!(
+        daily
+            .plan(&task, Some(0), "today", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let current = db.task_service().get(task.id).await.unwrap();
+    let mut renamed = current.clone();
+    renamed.description = "Old name".into();
+    assert!(
+        daily
+            .plan(&renamed, None, "today", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    db.task_service()
+        .set_completed(task.id, true)
+        .await
+        .unwrap();
+    assert!(matches!(
+        daily.plan(&current, None, "today", None).await,
+        Err(DaoError::TaskArchived)
+    ));
+    assert!(daily.list().await.unwrap().is_empty());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tomorrow_tasks")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn planning_without_timezone_history_defaults_to_utc_and_requires_fresh_listing() {
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Home").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Shopping", TaskUrgency::Someday)
+        .await
+        .unwrap();
+    let daily = PgDailyDao::new(db.pool.clone(), db.user.id);
+    assert_eq!(
+        daily
+            .plan(&task, None, "today", None)
+            .await
+            .unwrap()
+            .unwrap()
+            .timezone,
+        "UTC"
+    );
+    assert_eq!(daily.list().await.unwrap().len(), 1);
+    let other_category = db.category_service().create("Errands").await.unwrap();
+    db.task_service()
+        .update(task.id, other_category.id, &task.description, task.urgency)
+        .await
+        .unwrap();
+    assert!(
+        daily
+            .plan(&task, None, "tomorrow", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

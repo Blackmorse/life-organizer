@@ -2,6 +2,33 @@ use super::{MessageSender, ServiceError, notification::daily_messages, validate_
 use crate::{dao::DailyDao, domain::DailyTask};
 use std::sync::Arc;
 
+pub struct DailyPlanningService {
+    dao: Arc<dyn crate::dao::DailyPlanningDao>,
+}
+
+impl DailyPlanningService {
+    pub fn new(dao: Arc<dyn crate::dao::DailyPlanningDao>) -> Self {
+        Self { dao }
+    }
+
+    pub async fn plan(
+        &self,
+        listed: &crate::domain::Task,
+        index: Option<usize>,
+        date: &str,
+        timezone: Option<&str>,
+    ) -> Result<crate::dao::daily_work::DailyMove, ServiceError> {
+        validate_id(listed.id)?;
+        if index.is_some_and(|index| index >= listed.subtasks.len()) {
+            return Err(ServiceError::NotFound("subtask"));
+        }
+        self.dao
+            .plan(listed, index, date, timezone)
+            .await?
+            .ok_or(ServiceError::NotFound("task or subtask"))
+    }
+}
+
 #[derive(Clone)]
 pub struct DailyService {
     dao: Arc<dyn DailyDao>,

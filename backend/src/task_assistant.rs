@@ -5,7 +5,10 @@ use crate::{
         daily_work::{DailyMove, DailyWork, PgDailyWorkDao},
     },
     domain::{Category, Subtask, Task, TaskUrgency},
-    service::{CategoryService, DailyService, DailyWorkService, ServiceError, TaskService},
+    service::{
+        CategoryService, DailyPlanningService, DailyService, DailyWorkService, ServiceError,
+        TaskService,
+    },
 };
 use async_trait::async_trait;
 use langchain_rust::{
@@ -35,6 +38,15 @@ fn assistant_task(task: &Task) -> Value {
 }
 
 const PROMPT: &str = "You handle typed text and transcribed voice requests for a personal task organizer. \
+To add/select/plan an EXISTING ordinary task or step for today, tomorrow or a custom date, first \
+list_categories and list_active_tasks, match its name and category, then call add_task_to_day with \
+the exact listed task_id, date 'today', 'tomorrow', or explicit future YYYY-MM-DD, and optional \
+zero-based subtask_index from that listing for a named step. Omit subtask_index to select the \
+whole task (all its current steps). This selects existing work, not create_task or add_subtask. \
+Only do this on explicit selection/planning intent. Future planning leaves today's picks intact \
+and offers the work at 08:00 with Yes/No buttons. Today adds immediately. Timezone defaults to \
+saved user history (UTC if none); provide timezone only when explicitly supplied as an IANA name. \
+Never guess dates, years or timezones; ask for an exact date for other relative dates. \
 To move/defer/reschedule daily work, first list_tasks_of_the_day, then use move_task_of_the_day \
 with an exact listed id and date 'tomorrow' or an explicit YYYY-MM-DD date. Only move when explicitly \
 requested. If a date is ambiguous or relative other than tomorrow, ask for an exact date; never guess \
@@ -62,7 +74,7 @@ the user's language, plain text. Each message is independent; no previous conver
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
-    "Could not process the request. Before retrying, check /today for completion or move changes and the task/category list in the Mini App for created tasks or added subtasks. Check the Reminders tab for rescheduled reminders."
+    "Could not process the request. Before retrying, check /today for completion, selection or move changes and the task/category list in the Mini App for future plans, created tasks or added subtasks. Check the Reminders tab for rescheduled reminders."
 )]
 pub struct AssistantError;
 
@@ -113,6 +125,10 @@ impl VoiceAssistant for TaskAssistant {
             .await
             .map_err(|_| AssistantError)?;
         let state = Arc::new(ToolState {
+            planning: DailyPlanningService::new(Arc::new(PgDailyDao::new(
+                self.pool.clone(),
+                user.id,
+            ))),
             daily: DailyWorkService::new(Arc::new(PgDailyWorkDao::new(self.pool.clone(), user.id))),
             tasks: TaskService::new(Arc::new(PgTaskDao::new(self.pool.clone(), user.id))),
             categories: CategoryService::new(Arc::new(PgCategoryDao::new(
@@ -154,6 +170,12 @@ async fn reply_with_daily_summary(
 /// A committed mutation, answered from server state.
 #[derive(Clone)]
 enum Outcome {
+    Planned {
+        task: Task,
+        index: Option<usize>,
+        destination: DailyMove,
+        today: bool,
+    },
     Moved {
         item: DailyWork,
         destination: DailyMove,
@@ -173,6 +195,33 @@ enum Outcome {
 impl Outcome {
     fn reply(&self) -> (String, bool) {
         match self {
+            Self::Planned {
+                task,
+                index,
+                destination,
+                today,
+            } => (
+                format!(
+                    "{}: {}{} — {} ({}).{}",
+                    if *today {
+                        "Added to Tasks of the day"
+                    } else {
+                        "Planned"
+                    },
+                    task.description,
+                    index
+                        .map(|index| format!(" → {}", task.subtasks[index].description))
+                        .unwrap_or_default(),
+                    destination.date,
+                    destination.timezone,
+                    if *today {
+                        ""
+                    } else {
+                        " The bot will offer it at 08:00 with Yes/No buttons."
+                    }
+                ),
+                *today,
+            ),
             Self::Moved { item, destination } => (
                 format!(
                     "Moved: {}{} — {} ({}). The bot will offer it at 08:00.",
@@ -230,6 +279,7 @@ impl Outcome {
 }
 
 struct ToolState {
+    planning: DailyPlanningService,
     daily: DailyWorkService,
     tasks: TaskService,
     categories: CategoryService,
@@ -241,6 +291,7 @@ struct ToolState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolKind {
+    PlanTask,
     MoveDaily,
     ListDaily,
     CompleteDaily,
@@ -284,6 +335,15 @@ struct AddSubtaskInput {
     description: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanTaskInput {
+    task_id: i64,
+    subtask_index: Option<usize>,
+    date: String,
+    timezone: Option<String>,
+}
+
 /// Clean, pre-write rejections go back to the model; storage failures are
 /// ambiguous commit outcomes and stop the conversation.
 fn mutation_error(error: ServiceError) -> Option<Value> {
@@ -293,7 +353,7 @@ fn mutation_error(error: ServiceError) -> Option<Value> {
             json!({"error": "Item no longer exists or has changed; list the current items again."}),
         ),
         ServiceError::TaskArchived => Some(json!({"error":
-            "Task is archived; restore it in the app before adding steps."})),
+            "Task is archived; restore it in the app before changing it."})),
         _ => None,
     }
 }
@@ -302,6 +362,7 @@ fn mutation_error(error: ServiceError) -> Option<Value> {
 impl Tool for AssistantTool {
     fn name(&self) -> String {
         match self.kind {
+            ToolKind::PlanTask => "add_task_to_day",
             ToolKind::MoveDaily => "move_task_of_the_day",
             ToolKind::ListDaily => "list_tasks_of_the_day",
             ToolKind::CompleteDaily => "complete_task_of_the_day",
@@ -315,11 +376,12 @@ impl Tool for AssistantTool {
 
     fn description(&self) -> String {
         match self.kind {
+            ToolKind::PlanTask => "Select an existing ordinary task or step for today, tomorrow or a future YYYY-MM-DD. Requires exact task_id from list_active_tasks and optional zero-based subtask_index. Without an index selects all current steps, or the whole task if none. Today adds immediately; future dates leave today's picks intact and create an 08:00 Yes/No offer. Optional timezone must be an explicitly supplied IANA name; otherwise saved history, then UTC, is used.",
             ToolKind::MoveDaily => "Move explicitly requested unfinished daily ordinary work to a future 08:00 offer, or reschedule a reminder preserving saved local time/timezone. Requires exact id from list_tasks_of_the_day. date is tomorrow or explicit YYYY-MM-DD. Scheduled work cannot move.",
             ToolKind::CompleteDaily => "Mark one explicitly requested daily task or subtask completed by its exact id from the listing tool. Never guess an id.",
             ToolKind::ListDaily => "List ALL currently selected Tasks of the day with exact ids, task names, category, optional subtask and completion state. Parents and selected steps have separate ids.",
             ToolKind::ListCategories => "List ALL task categories with their exact numeric ids and names. Required before create_task to obtain a valid category_id.",
-            ToolKind::ListTasks => "List ALL active (not archived) ordinary tasks with exact numeric ids, names, category_id, urgency and current subtasks. Required before add_subtask to obtain a valid task_id.",
+            ToolKind::ListTasks => "List ALL active (not archived) ordinary tasks with exact numeric ids, names, category_id, urgency and current ordered subtasks. Required before add_subtask or add_task_to_day to obtain a valid task_id and subtask index. Use list_categories to resolve category names.",
             ToolKind::CreateTask => "Create one new ordinary task in a category from list_categories, with a clear description, urgency soon/upcoming/someday (default someday) and optional ordered step descriptions. Only when the user explicitly asks to add/create a task.",
             ToolKind::AddSubtask => "Append one new step description to an active task whose exact task_id came from list_active_tasks. Only when the user explicitly asks to add a step/subtask to an existing task.",
         }.into()
@@ -327,6 +389,12 @@ impl Tool for AssistantTool {
 
     fn parameters(&self) -> Value {
         match self.kind {
+            ToolKind::PlanTask => json!({"type":"object", "properties":{
+                "task_id":{"type":"integer"},
+                "subtask_index":{"type":"integer","minimum":0},
+                "date":{"type":"string","description":"today, tomorrow, or explicit future YYYY-MM-DD"},
+                "timezone":{"type":"string","description":"Only when user explicitly supplies an IANA timezone; otherwise omit"}
+            },"required":["task_id","date"],"additionalProperties":false}),
             ToolKind::MoveDaily => {
                 json!({"type":"object","properties":{"id":{"type":"string"},"date":{"type":"string","description":"tomorrow or an explicit future YYYY-MM-DD date"}},"required":["id","date"],"additionalProperties":false})
             }
@@ -356,6 +424,50 @@ impl Tool for AssistantTool {
 
     async fn run(&self, input: Value) -> Result<String, Box<dyn Error>> {
         let output = match self.kind {
+            ToolKind::PlanTask => {
+                let Ok(input) = serde_json::from_value::<PlanTaskInput>(input) else {
+                    return Ok(json!({"error":"Expected listed task_id, date, optional subtask_index and timezone."}).to_string());
+                };
+                let task = self
+                    .state
+                    .listed_tasks
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|tasks| tasks.iter().find(|task| task.id == input.task_id))
+                    .cloned();
+                let Some(task) = task else {
+                    return Ok(json!({"error":"List active tasks first; use only an exact returned task_id."}).to_string());
+                };
+                match self
+                    .state
+                    .planning
+                    .plan(
+                        &task,
+                        input.subtask_index,
+                        &input.date,
+                        input.timezone.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(destination) => {
+                        let output = json!({"selected":true,"destination":destination,"task":assistant_task(&task),"subtask_index":input.subtask_index});
+                        *self.state.outcome.lock().await = Some(Outcome::Planned {
+                            task,
+                            index: input.subtask_index,
+                            destination,
+                            today: input.date == "today",
+                        });
+                        output
+                    }
+                    Err(error) => {
+                        return match mutation_error(error) {
+                            Some(error) => Ok(error.to_string()),
+                            None => Err(AssistantError.into()),
+                        };
+                    }
+                }
+            }
             ToolKind::MoveDaily => {
                 let Ok(input) = serde_json::from_value::<MoveInput>(input) else {
                     return Ok(json!({"error":"Expected an exact listed id and date (tomorrow or YYYY-MM-DD)."}).to_string());
@@ -599,6 +711,7 @@ async fn conversation(
         ToolKind::ListTasks,
         ToolKind::CreateTask,
         ToolKind::AddSubtask,
+        ToolKind::PlanTask,
     ]
     .into_iter()
     .map(|kind| {
@@ -765,6 +878,142 @@ mod tests {
                 .contains("No tasks currently in Tasks of the day.")
         );
         assert!(reply.daily_messages.is_empty());
+    }
+
+    type PlannedSelection = (i64, Option<usize>, String, Option<String>);
+
+    #[derive(Default)]
+    struct PlanningStore {
+        writes: StdMutex<Vec<PlannedSelection>>,
+        stale: bool,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl crate::dao::DailyPlanningDao for PlanningStore {
+        async fn plan(
+            &self,
+            listed: &Task,
+            index: Option<usize>,
+            date: &str,
+            timezone: Option<&str>,
+        ) -> Result<Option<DailyMove>, DaoError> {
+            self.writes.lock().unwrap().push((
+                listed.id,
+                index,
+                date.into(),
+                timezone.map(str::to_owned),
+            ));
+            if self.fail {
+                return Err(sqlx::Error::PoolClosed.into());
+            }
+            Ok((!self.stale).then(|| DailyMove {
+                date: if date == "today" {
+                    "2026-11-06".into()
+                } else {
+                    "2026-11-07".into()
+                },
+                timezone: timezone.unwrap_or("Europe/Berlin").into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn lists_then_selects_existing_work_for_today_tomorrow_and_custom_date() {
+        for (date, index, timezone) in [
+            ("today", None, None),
+            ("tomorrow", Some(0), None),
+            ("2027-02-03", None, Some("Asia/Tokyo")),
+        ] {
+            let server = model_server(vec![
+                call("list_categories", json!({})),
+                call("list_active_tasks", json!({})),
+                call(
+                    "add_task_to_day",
+                    json!({"task_id":42,"date":date,"subtask_index":index,"timezone":timezone}),
+                ),
+            ])
+            .await;
+            let store = Arc::new(PlanningStore::default());
+            let mut state = state(
+                Arc::new(WorkStore::default()),
+                Arc::new(CategoryStore::default()),
+                Arc::new(TaskStore::default()),
+            );
+            Arc::get_mut(&mut state).unwrap().planning = DailyPlanningService::new(store.clone());
+            let response = conversation(&server.model, state, "Add Release to my planned tasks")
+                .await
+                .unwrap();
+            assert_eq!(
+                *store.writes.lock().unwrap(),
+                [(42, index, date.to_owned(), timezone.map(str::to_owned))]
+            );
+            assert_eq!(response.1, date == "today");
+            assert!(response.0.contains("Release <app>"));
+            assert_eq!(response.0.contains("Deploy backend"), index.is_some());
+            assert_eq!(response.0.contains("08:00 with Yes/No"), date != "today");
+            assert!(response.0.contains(timezone.unwrap_or("Europe/Berlin")));
+            assert_eq!(server.requests.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn day_selection_rejects_unlisted_invalid_and_stale_targets_and_stops_on_storage_failure()
+    {
+        for (listed, input, stale, fail, expected_writes) in [
+            (false, json!({"task_id":42,"date":"today"}), false, false, 0),
+            (true, json!({"task_id":999,"date":"today"}), false, false, 0),
+            (
+                true,
+                json!({"task_id":42,"date":"today","subtask_index":5}),
+                false,
+                false,
+                0,
+            ),
+            (
+                true,
+                json!({"task_id":42,"date":"today","subtask_index":-1}),
+                false,
+                false,
+                0,
+            ),
+            (
+                true,
+                json!({"task_id":42,"date":"today","unknown":true}),
+                false,
+                false,
+                0,
+            ),
+            (true, json!({"task_id":42,"date":"today"}), true, false, 1),
+            (true, json!({"task_id":42,"date":"today"}), false, true, 1),
+        ] {
+            let store = Arc::new(PlanningStore {
+                stale,
+                fail,
+                ..Default::default()
+            });
+            let mut state = state(
+                Arc::new(WorkStore::default()),
+                Arc::new(CategoryStore::default()),
+                Arc::new(TaskStore::default()),
+            );
+            Arc::get_mut(&mut state).unwrap().planning = DailyPlanningService::new(store.clone());
+            if listed {
+                *state.listed_tasks.lock().await = Some(vec![task()]);
+            }
+            let tool = AssistantTool {
+                state: state.clone(),
+                kind: ToolKind::PlanTask,
+            };
+            let result = tool.run(input).await;
+            assert!(state.outcome.lock().await.is_none());
+            assert_eq!(store.writes.lock().unwrap().len(), expected_writes);
+            if fail {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().contains("error"));
+            }
+        }
     }
 
     #[derive(Default)]
@@ -981,6 +1230,7 @@ mod tests {
         tasks: Arc<TaskStore>,
     ) -> Arc<ToolState> {
         Arc::new(ToolState {
+            planning: DailyPlanningService::new(Arc::new(PlanningStore::default())),
             daily: DailyWorkService::new(work),
             tasks: TaskService::new(tasks),
             categories: CategoryService::new(categories),
@@ -1105,7 +1355,7 @@ mod tests {
         assert_eq!(*store.writes.lock().unwrap(), [item().id]);
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 8);
         assert_eq!(requests[1]["messages"][2]["role"], "assistant");
         assert_eq!(requests[1]["messages"][3]["role"], "tool");
         let result: Value =

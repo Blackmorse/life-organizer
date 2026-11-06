@@ -1,5 +1,5 @@
 use super::DaoError;
-use crate::domain::{DailyTask, DailyTaskSource, DailyTaskSummary, Subtask};
+use crate::domain::{DailyTask, DailyTaskSource, DailyTaskSummary, Subtask, Task};
 use async_trait::async_trait;
 use sqlx::{PgPool, types::Json};
 
@@ -33,6 +33,36 @@ pub trait DailyDao: Send + Sync {
         date: &str,
     ) -> Result<bool, DaoError>;
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError>;
+}
+
+#[async_trait]
+pub trait DailyPlanningDao: Send + Sync {
+    async fn plan(
+        &self,
+        listed: &Task,
+        index: Option<usize>,
+        date: &str,
+        timezone: Option<&str>,
+    ) -> Result<Option<super::daily_work::DailyMove>, DaoError>;
+}
+
+#[async_trait]
+impl DailyPlanningDao for PgDailyDao {
+    async fn plan(
+        &self,
+        listed: &Task,
+        index: Option<usize>,
+        date: &str,
+        timezone: Option<&str>,
+    ) -> Result<Option<super::daily_work::DailyMove>, DaoError> {
+        let dao = if date == "today" {
+            Self::new(self.pool.clone(), self.user_id)
+        } else {
+            Self::tomorrow(self.pool.clone(), self.user_id)
+        };
+        dao.select_guarded(listed.id, index, timezone, Some(date), Some(listed))
+            .await
+    }
 }
 
 pub struct PgDailyDao {
@@ -187,20 +217,62 @@ impl PgDailyDao {
         timezone: &str,
         date: Option<&str>,
     ) -> Result<bool, DaoError> {
+        Ok(self
+            .select_guarded(task_id, index, Some(timezone), date, None)
+            .await?
+            .is_some())
+    }
+
+    async fn select_guarded(
+        &self,
+        task_id: i64,
+        index: Option<usize>,
+        timezone: Option<&str>,
+        date: Option<&str>,
+        listed: Option<&Task>,
+    ) -> Result<Option<super::daily_work::DailyMove>, DaoError> {
         // Table names are fixed constructor values, never user input.
         let table = self.table;
         let mut tx = self.pool.begin().await?;
-        let row: Option<(bool, Json<Vec<Subtask>>)> = sqlx::query_as("SELECT t.completed, t.subtasks FROM tasks t JOIN categories c ON c.id = t.category_id WHERE t.id = $1 AND c.user_id = $2 FOR UPDATE OF t")
+        let row: Option<(bool, Json<Vec<Subtask>>, String, i64)> = sqlx::query_as("SELECT t.completed, t.subtasks, t.description, t.category_id FROM tasks t JOIN categories c ON c.id = t.category_id WHERE t.id = $1 AND c.user_id = $2 FOR UPDATE OF t")
             .bind(task_id).bind(self.user_id).fetch_optional(&mut *tx).await?;
-        let Some((completed, Json(mut steps))) = row else {
-            return Ok(false);
+        let Some((completed, Json(mut steps), description, category_id)) = row else {
+            return Ok(None);
         };
+        if listed.is_some_and(|task| {
+            task.description != description
+                || task.category_id != category_id
+                || task.subtasks.len() != steps.len()
+                || task
+                    .subtasks
+                    .iter()
+                    .zip(&steps)
+                    .any(|(old, new)| old.id != new.id || old.description != new.description)
+        }) {
+            return Ok(None);
+        }
         if completed {
             return Err(DaoError::TaskArchived);
         }
         if index.is_some_and(|index| index >= steps.len()) {
-            return Ok(false);
+            return Ok(None);
         }
+        let saved_timezone: String;
+        let timezone = match timezone {
+            Some(timezone) => timezone,
+            None => {
+                saved_timezone = sqlx::query_scalar("SELECT COALESCE(
+                    (SELECT p.timezone FROM daily_tasks p JOIN tasks t ON t.id=p.task_id JOIN categories c ON c.id=t.category_id WHERE c.user_id=$1 ORDER BY p.expires_at DESC,t.id DESC LIMIT 1),
+                    (SELECT p.timezone FROM tomorrow_tasks p JOIN tasks t ON t.id=p.task_id JOIN categories c ON c.id=t.category_id WHERE c.user_id=$1 ORDER BY p.expires_at DESC,t.id DESC LIMIT 1),
+                    (SELECT timezone FROM morning_offers WHERE user_id=$1 ORDER BY reset_at DESC,id DESC LIMIT 1),
+                    (SELECT timezone FROM scheduled_tasks WHERE user_id=$1 ORDER BY id DESC LIMIT 1),
+                    (SELECT timezone FROM reminder_tasks WHERE user_id=$1 ORDER BY id DESC LIMIT 1),'UTC')")
+                    .bind(self.user_id).fetch_one(&mut *tx).await?;
+                &saved_timezone
+            }
+        };
+        let zone = crate::planning::zone(timezone)
+            .map_err(|_| DaoError::InvalidMove("invalid timezone"))?;
         let instant = super::maintenance::now(&mut tx).await?;
         super::maintenance::expire_picks(
             &mut tx,
@@ -210,13 +282,15 @@ impl PgDailyDao {
             instant,
         )
         .await?;
-        let zone = super::maintenance::timezone(timezone)?;
-        let reset = if table == "tomorrow_tasks" {
+        let (day, reset) = if table == "tomorrow_tasks" {
             let (day, zone) =
                 super::daily_move::target(date.unwrap_or("tomorrow"), timezone, instant)?;
-            crate::planning::at(zone, day, 2)
+            (day, crate::planning::at(zone, day, 2))
         } else {
-            crate::planning::daily_reset(zone, instant)
+            (
+                instant.with_timezone(&zone).date_naive(),
+                crate::planning::daily_reset(zone, instant),
+            )
         };
         let mut subtask_ids = Vec::new();
         for (position, step) in steps.iter_mut().enumerate() {
@@ -263,6 +337,9 @@ impl PgDailyDao {
         sqlx::query(&format!("INSERT INTO {table}(task_id, subtask_id, expires_at, timezone) SELECT $1, id, $4, $3 FROM unnest($2::text[]) AS ids(id) ON CONFLICT (task_id, subtask_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, timezone = EXCLUDED.timezone"))
             .bind(task_id).bind(&subtask_ids).bind(timezone).bind(reset).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(Some(super::daily_work::DailyMove {
+            date: day.to_string(),
+            timezone: timezone.into(),
+        }))
     }
 }
