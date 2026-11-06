@@ -27,10 +27,11 @@ async fn input(db: &TestDb, days: i32) -> ReminderTaskInput {
 }
 async fn prepare_today(db: &TestDb) -> i64 {
     // Preparation uses an explicit instant; delivery is forced due to avoid wall-clock-dependent tests.
-    sqlx::query(
-        "SELECT prepare_reminder_morning_offers((current_date + time '08:00') AT TIME ZONE 'UTC')",
+    let day = support::clock(db).await.date_naive();
+    backend::dao::maintenance::prepare_reminders_at(
+        &db.pool,
+        backend::planning::at(chrono_tz::UTC, day, 8),
     )
-    .execute(&db.pool)
     .await
     .unwrap();
     sqlx::query_scalar("UPDATE morning_offers SET due_at=statement_timestamp()-interval '1 second', valid_until=statement_timestamp()+interval '1 hour' RETURNING id")
@@ -294,10 +295,12 @@ async fn declining_and_expiry_preserve_reminders_without_carryover_or_missed_day
     assert!(saved.completed);
     assert_eq!(saved.details, task.details);
     svc.complete(task.id, false).await.unwrap();
-    sqlx::query("SELECT prepare_reminder_morning_offers(statement_timestamp()+interval '3 days')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    backend::dao::maintenance::prepare_reminders_at(
+        &db.pool,
+        support::clock(&db).await + chrono::Duration::days(3),
+    )
+    .await
+    .unwrap();
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM morning_offer_reminder_items WHERE kind='today'")
             .fetch_one(&db.pool)
@@ -429,19 +432,11 @@ async fn morning_dates_use_calendar_days_not_24_hours_or_two_am_planning_dates()
     ] {
         let id: i64 = sqlx::query_scalar("INSERT INTO reminder_tasks(user_id, description, due_at, timezone) VALUES ($1,'Early event',$2::text::timestamptz,$3) RETURNING id")
             .bind(db.user.id).bind(event).bind(zone).fetch_one(&db.pool).await.unwrap();
-        sqlx::query("SELECT prepare_reminder_morning_offers($1::text::timestamptz)")
-            .bind(instant)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        support::reminders_at(&db, instant).await;
         let correct: bool = sqlx::query_scalar("SELECT m.due_at=$2::text::timestamptz FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id WHERE reminder_id=$1 AND kind='tomorrow'")
             .bind(id).bind(tomorrow_due).fetch_one(&db.pool).await.unwrap();
         assert!(correct);
-        sqlx::query("SELECT prepare_reminder_morning_offers($1::text::timestamptz)")
-            .bind(today_due)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        support::reminders_at(&db, today_due).await;
         let correct: bool = sqlx::query_scalar("SELECT m.due_at=$2::text::timestamptz AND m.valid_until=$3::text::timestamptz FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id WHERE reminder_id=$1 AND kind='today'")
             .bind(id).bind(today_due).bind(expiry).fetch_one(&db.pool).await.unwrap();
         assert!(correct);
@@ -476,9 +471,13 @@ async fn reminder_expiry_upgrade_and_writes_enforce_event_days_two_am_boundary()
         let boundary: bool = sqlx::query_scalar("SELECT selected_until > $2::text::timestamptz - interval '1 millisecond' AND NOT selected_until > $2::text::timestamptz FROM reminder_tasks WHERE timezone=$1")
             .bind(zone).bind(expiry).fetch_one(&db.pool).await.unwrap();
         assert!(boundary);
-        // Subsequent writes cannot extend yesterday's reminder into today.
-        sqlx::query("UPDATE reminder_tasks SET selected_until=statement_timestamp()+interval '1 day' WHERE timezone=$1")
-            .bind(zone).execute(&db.pool).await.unwrap();
+        // Application selection cannot extend yesterday's reminder into today.
+        let id: i64 = sqlx::query_scalar("SELECT id FROM reminder_tasks WHERE timezone=$1")
+            .bind(zone)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert!(service(&db, db.user.id).select_today(id).await.is_err());
         let correct: bool = sqlx::query_scalar(
             "SELECT selected_until=$2::text::timestamptz FROM reminder_tasks WHERE timezone=$1",
         )
@@ -562,24 +561,23 @@ async fn missed_notice_dates_follow_saved_timezone_and_do_not_backfill_older_day
         let id: i64 = sqlx::query_scalar("INSERT INTO reminder_tasks(user_id,description,due_at,timezone) VALUES ($1,'Missed',$2::text::timestamptz,$3) RETURNING id")
             .bind(db.user.id).bind(due).bind(zone).fetch_one(&db.pool).await.unwrap();
         // Before 02:00, no next-morning missed note exists.
-        sqlx::query("SELECT prepare_reminder_morning_offers($1::text::timestamptz - interval '1 millisecond')")
-            .bind(reset).execute(&db.pool).await.unwrap();
+        backend::dao::maintenance::prepare_reminders_at(
+            &db.pool,
+            support::timestamp(&db, reset).await - chrono::Duration::milliseconds(1),
+        )
+        .await
+        .unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_reminder_items WHERE reminder_id=$1 AND kind='yesterday'")
             .bind(id).fetch_one(&db.pool).await.unwrap();
         assert_eq!(count, 0);
-        sqlx::query("SELECT prepare_reminder_morning_offers($1::text::timestamptz)")
-            .bind(reset)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        support::reminders_at(&db, reset).await;
         let correct: bool = sqlx::query_scalar("SELECT m.reset_at=$2::text::timestamptz AND m.due_at=$3::text::timestamptz AND m.valid_until=$4::text::timestamptz FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id WHERE i.reminder_id=$1 AND i.kind='yesterday'")
             .bind(id).bind(reset).bind(morning).bind(end).fetch_one(&db.pool).await.unwrap();
         assert!(correct);
-        sqlx::query(
-            "SELECT prepare_reminder_morning_offers($1::text::timestamptz + interval '3 days')",
+        backend::dao::maintenance::prepare_reminders_at(
+            &db.pool,
+            support::timestamp(&db, end).await + chrono::Duration::days(3),
         )
-        .bind(end)
-        .execute(&db.pool)
         .await
         .unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_reminder_items WHERE reminder_id=$1 AND kind='yesterday'")

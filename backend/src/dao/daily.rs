@@ -107,18 +107,15 @@ impl DailyDao for PgDailyDao {
             .collect())
     }
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError> {
-        Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_timezone_names WHERE name = $1)")
-                .bind(timezone)
-                .fetch_one(&self.pool)
-                .await?,
-        )
+        Ok(crate::planning::zone(timezone).is_ok())
     }
 
     async fn list(&self) -> Result<Vec<DailyTask>, DaoError> {
         let table = self.table;
-        sqlx::query(&format!("DELETE FROM {table} d USING tasks t, categories c WHERE d.task_id = t.id AND t.category_id = c.id AND c.user_id = $1 AND d.expires_at <= statement_timestamp()"))
-            .bind(self.user_id).execute(&self.pool).await?;
+        let mut tx = self.pool.begin().await?;
+        let instant = super::maintenance::now(&mut tx).await?;
+        super::maintenance::expire_picks(&mut tx, table, Some(self.user_id), None, instant).await?;
+        tx.commit().await?;
         let rows: Vec<(i64, String, i64)> = sqlx::query_as(&format!("SELECT d.task_id, d.subtask_id, (extract(epoch FROM d.expires_at) * 1000)::bigint FROM {table} d JOIN tasks t ON t.id = d.task_id JOIN categories c ON c.id = t.category_id WHERE c.user_id = $1 AND d.expires_at > statement_timestamp() AND (d.subtask_id = '' OR EXISTS (SELECT 1 FROM jsonb_array_elements(t.subtasks) s WHERE s->>'id' = d.subtask_id)) ORDER BY d.task_id, d.subtask_id"))
             .bind(self.user_id).fetch_all(&self.pool).await?;
         Ok(rows
@@ -137,13 +134,8 @@ impl DailyDao for PgDailyDao {
         index: Option<usize>,
         timezone: &str,
     ) -> Result<bool, DaoError> {
-        // Table/function names are fixed constructor values, never user input.
+        // Table names are fixed constructor values, never user input.
         let table = self.table;
-        let reset = if table == "tomorrow_tasks" {
-            "tomorrow_reset_at"
-        } else {
-            "daily_reset_at"
-        };
         let mut tx = self.pool.begin().await?;
         let row: Option<(bool, Json<Vec<Subtask>>)> = sqlx::query_as("SELECT t.completed, t.subtasks FROM tasks t JOIN categories c ON c.id = t.category_id WHERE t.id = $1 AND c.user_id = $2 FOR UPDATE OF t")
             .bind(task_id).bind(self.user_id).fetch_optional(&mut *tx).await?;
@@ -156,6 +148,21 @@ impl DailyDao for PgDailyDao {
         if index.is_some_and(|index| index >= steps.len()) {
             return Ok(false);
         }
+        let instant = super::maintenance::now(&mut tx).await?;
+        super::maintenance::expire_picks(
+            &mut tx,
+            table,
+            Some(self.user_id),
+            Some(task_id),
+            instant,
+        )
+        .await?;
+        let zone = super::maintenance::timezone(timezone)?;
+        let reset = if table == "tomorrow_tasks" {
+            crate::planning::tomorrow_reset(zone, instant)
+        } else {
+            crate::planning::daily_reset(zone, instant)
+        };
         let mut subtask_ids = Vec::new();
         for (position, step) in steps.iter_mut().enumerate() {
             if index.is_some_and(|index| index != position) {
@@ -189,22 +196,27 @@ impl DailyDao for PgDailyDao {
             .await?;
         }
         // Calendar-day arithmetic preserves local 02:00 across DST transitions.
-        sqlx::query(&format!("INSERT INTO {table}(task_id, subtask_id, expires_at, timezone) SELECT $1, id, {reset}($3, statement_timestamp()), $3 FROM unnest($2::text[]) AS ids(id) ON CONFLICT (task_id, subtask_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, timezone = EXCLUDED.timezone"))
-            .bind(task_id).bind(&subtask_ids).bind(timezone).execute(&mut *tx).await?;
-        sqlx::query(&format!(
-            "DELETE FROM {table} WHERE task_id = $1 AND expires_at <= statement_timestamp()"
-        ))
-        .bind(task_id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(&format!("INSERT INTO {table}(task_id, subtask_id, expires_at, timezone) SELECT $1, id, $4, $3 FROM unnest($2::text[]) AS ids(id) ON CONFLICT (task_id, subtask_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, timezone = EXCLUDED.timezone"))
+            .bind(task_id).bind(&subtask_ids).bind(timezone).bind(reset).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(true)
     }
 
     async fn remove(&self, task_id: i64, subtask_id: &str) -> Result<(), DaoError> {
         let table = self.table;
+        let mut tx = self.pool.begin().await?;
+        let instant = super::maintenance::now(&mut tx).await?;
+        super::maintenance::expire_picks(
+            &mut tx,
+            table,
+            Some(self.user_id),
+            Some(task_id),
+            instant,
+        )
+        .await?;
         sqlx::query(&format!("DELETE FROM {table} d USING tasks t, categories c WHERE d.task_id = $1 AND ($2 = '' OR d.subtask_id = $2) AND t.id = d.task_id AND c.id = t.category_id AND c.user_id = $3"))
-            .bind(task_id).bind(subtask_id).bind(self.user_id).execute(&self.pool).await?;
+            .bind(task_id).bind(subtask_id).bind(self.user_id).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 }

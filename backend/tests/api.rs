@@ -308,8 +308,20 @@ async fn tomorrow_selection_is_independent_persistent_scoped_and_validated() {
         .1,
         json!([])
     );
-    let expiry_correct: bool = sqlx::query_scalar("SELECT bool_and(expires_at=tomorrow_reset_at(timezone, statement_timestamp())) FROM tomorrow_tasks").fetch_one(&db.pool).await.unwrap();
-    assert!(expiry_correct);
+    let expiries: Vec<(String, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT timezone,expires_at FROM tomorrow_tasks")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    for (zone, expiry) in expiries {
+        assert_eq!(
+            expiry,
+            backend::planning::tomorrow_reset(
+                backend::planning::zone(&zone).unwrap(),
+                support::clock(&db).await
+            )
+        );
+    }
     request(
         &app,
         "POST",
@@ -770,16 +782,14 @@ async fn daily_reset_uses_local_two_am_with_calendar_days_and_dst() {
             "2026-03-30 00:00:00+00",
         ),
     ] {
-        let matches: bool = sqlx::query_scalar(
-            "SELECT daily_reset_at($1, $2::text::timestamptz) = $3::text::timestamptz",
-        )
-        .bind(zone)
-        .bind(now)
-        .bind(expected)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-        assert!(matches, "{zone}: {now} -> {expected}");
+        assert_eq!(
+            backend::planning::daily_reset(
+                backend::planning::zone(zone).unwrap(),
+                support::timestamp(&db, now).await
+            ),
+            support::timestamp(&db, expected).await,
+            "{zone}: {now} -> {expected}"
+        );
     }
 }
 
@@ -1227,7 +1237,7 @@ async fn ordered_subtasks_are_persisted_validated_and_user_scoped() {
         moved.subtasks,
         [Subtask::new("Test"), Subtask::new("Design updated")]
     );
-    // Invalid writes leave the whole list intact, including direct SQL writes.
+    // Backend validation rejects malformed lists atomically without DB routines.
     for invalid in [
         json!([Subtask::new("Valid"), Subtask::new("  ")]),
         json!([null]),
@@ -1238,16 +1248,23 @@ async fn ordered_subtasks_are_persisted_validated_and_user_scoped() {
         json!([{"description": "Step", "completed": "true"}]),
         json!([{"description": "Step", "completed": false, "extra": 1}]),
     ] {
-        let error = sqlx::query("UPDATE tasks SET subtasks = $2 WHERE id = $1")
-            .bind(task.id)
-            .bind(sqlx::types::Json(invalid))
-            .execute(&db.pool)
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(&path)
+                    .header(
+                        "authorization",
+                        support::authorization_for(support::TELEGRAM_ID),
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"subtasks":invalid}).to_string()))
+                    .unwrap(),
+            )
             .await
-            .unwrap_err();
-        assert_eq!(
-            error.as_database_error().unwrap().code().as_deref(),
-            Some("23514")
-        );
+            .unwrap();
+        assert!(response.status().is_client_error());
     }
     assert_eq!(
         db.task_service().get(task.id).await.unwrap().subtasks,

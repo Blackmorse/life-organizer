@@ -115,19 +115,30 @@ impl ReminderDao for PgReminderDao {
             .bind(id).bind(self.user_id).execute(&self.pool).await?.rows_affected() > 0)
     }
     async fn select_today(&self, id: i64) -> Result<Option<ReminderTask>, DaoError> {
-        Ok(sqlx::query_as::<_, ReminderRow>(&format!(
-            "UPDATE reminder_tasks SET selected_until = ((due_at AT TIME ZONE timezone)::date + 1 + time '02:00') AT TIME ZONE timezone
-             WHERE id=$1 AND user_id=$2 AND NOT completed
-                AND (due_at AT TIME ZONE timezone)::date = (statement_timestamp() AT TIME ZONE timezone)::date
-             RETURNING {COLUMNS}"
-        )).bind(id).bind(self.user_id).fetch_optional(&self.pool).await?.map(Into::into))
+        let mut tx = self.pool.begin().await?;
+        let row: Option<(chrono::DateTime<chrono::Utc>,String)> = sqlx::query_as("SELECT due_at,timezone FROM reminder_tasks WHERE id=$1 AND user_id=$2 AND NOT completed FOR UPDATE")
+            .bind(id).bind(self.user_id).fetch_optional(&mut *tx).await?;
+        let Some((event, timezone)) = row else {
+            return Ok(None);
+        };
+        let instant = super::maintenance::now(&mut tx).await?;
+        let zone = super::maintenance::timezone(&timezone)?;
+        let day = event.with_timezone(&zone).date_naive();
+        if day != instant.with_timezone(&zone).date_naive() {
+            return Ok(None);
+        }
+        let expiry = crate::planning::at(zone, day.succ_opt().unwrap(), 2);
+        let result = sqlx::query_as::<_, ReminderRow>(&format!(
+            "UPDATE reminder_tasks SET selected_until=$2 WHERE id=$1 RETURNING {COLUMNS}"
+        ))
+        .bind(id)
+        .bind(expiry)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(result.into()))
     }
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError> {
-        Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_timezone_names WHERE name=$1)")
-                .bind(timezone)
-                .fetch_one(&self.pool)
-                .await?,
-        )
+        Ok(crate::planning::zone(timezone).is_ok())
     }
 }

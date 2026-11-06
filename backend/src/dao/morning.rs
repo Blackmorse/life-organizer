@@ -36,21 +36,18 @@ impl MorningStore {
     pub async fn sweep(&self) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE reminder_tasks SET selected_until=NULL WHERE selected_until <= statement_timestamp()")
             .execute(&self.pool).await?;
-        sqlx::query("DELETE FROM tomorrow_tasks WHERE expires_at <= statement_timestamp()")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM daily_tasks WHERE expires_at <= statement_timestamp()")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("SELECT prepare_scheduled_morning_offers(statement_timestamp())")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("SELECT prepare_reminder_morning_offers(statement_timestamp())")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("SELECT prepare_backlog_morning_offers(statement_timestamp())")
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        let instant = super::maintenance::now(&mut tx).await?;
+        // Both tables share parent locks. Acquire their union in stable order
+        // before preserving either table, avoiding cross-table lock inversions.
+        sqlx::query("SELECT t.id FROM tasks t WHERE EXISTS(SELECT 1 FROM daily_tasks d WHERE d.task_id=t.id AND d.expires_at <= $1) OR EXISTS(SELECT 1 FROM tomorrow_tasks d WHERE d.task_id=t.id AND d.expires_at <= $1) ORDER BY t.id FOR UPDATE")
+            .bind(instant).fetch_all(&mut *tx).await?;
+        super::maintenance::expire_picks(&mut tx, "tomorrow_tasks", None, None, instant).await?;
+        super::maintenance::expire_picks(&mut tx, "daily_tasks", None, None, instant).await?;
+        tx.commit().await?;
+        super::maintenance::prepare_scheduled_at(&self.pool, instant).await?;
+        super::maintenance::prepare_reminders_at(&self.pool, instant).await?;
+        super::maintenance::prepare_backlog_at(&self.pool, instant).await?;
         sqlx::query("UPDATE morning_offers SET state = 'expired' WHERE state IN ('pending', 'sent') AND valid_until <= statement_timestamp()")
             .execute(&self.pool).await?;
         Ok(())
@@ -244,9 +241,25 @@ impl MorningStore {
             // eligibility checking and restoration. Stable order avoids deadlocks.
             sqlx::query("SELECT t.id FROM tasks t JOIN categories c ON c.id = t.category_id WHERE c.user_id = $2 AND EXISTS (SELECT 1 FROM morning_offer_items i WHERE i.offer_id = $1 AND i.task_id = t.id) ORDER BY t.id FOR UPDATE OF t")
                 .bind(id).bind(user_id).fetch_all(&mut *tx).await?;
+            let instant = super::maintenance::now(&mut tx).await?;
+            // Preserve replaced expired picks before accepting the new list.
+            let tasks: Vec<i64> = sqlx::query_scalar("SELECT DISTINCT task_id FROM morning_offer_items WHERE offer_id=$1 ORDER BY task_id")
+                .bind(id).fetch_all(&mut *tx).await?;
+            for task in tasks {
+                super::maintenance::expire_picks(
+                    &mut tx,
+                    "daily_tasks",
+                    Some(user_id),
+                    Some(task),
+                    instant,
+                )
+                .await?;
+            }
+            let reset =
+                crate::planning::daily_reset(super::maintenance::timezone(&timezone)?, instant);
             count = sqlx::query(
                 "INSERT INTO daily_tasks(task_id, subtask_id, expires_at, timezone)
-                 SELECT t.id, i.subtask_id, daily_reset_at($3, statement_timestamp()), $3
+                  SELECT t.id, i.subtask_id, $4, $3
                  FROM morning_offer_items i JOIN tasks t ON t.id = i.task_id JOIN categories c ON c.id = t.category_id
                  WHERE i.offer_id = $1 AND c.user_id = $2 AND NOT t.completed
                    AND (i.subtask_id = '' OR EXISTS (SELECT 1 FROM jsonb_array_elements(t.subtasks) s
@@ -254,7 +267,7 @@ impl MorningStore {
                  ORDER BY t.id, i.subtask_id
                  ON CONFLICT(task_id, subtask_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, timezone = EXCLUDED.timezone
                  WHERE daily_tasks.expires_at <= statement_timestamp()")
-                .bind(id).bind(user_id).bind(timezone).execute(&mut *tx).await?.rows_affected();
+                .bind(id).bind(user_id).bind(timezone).bind(reset).execute(&mut *tx).await?.rows_affected();
             count += sqlx::query(
                 "UPDATE scheduled_occurrences o SET selected = true
                  FROM morning_offer_scheduled_items i, scheduled_tasks s
@@ -268,18 +281,38 @@ impl MorningStore {
             .execute(&mut *tx)
             .await?
             .rows_affected();
-            count += sqlx::query(
-                "UPDATE reminder_tasks r SET selected_until=m.valid_until
-                 FROM morning_offer_reminder_items i, morning_offers m
-                 WHERE i.offer_id=$1 AND m.id=i.offer_id AND i.kind='today'
-                     AND r.id=i.reminder_id AND r.user_id=$2 AND NOT r.completed
-                     AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.selected_until IS NULL",
+            let reminders: Vec<(
+                i64,
+                chrono::DateTime<chrono::Utc>,
+                String,
+                chrono::DateTime<chrono::Utc>,
+            )> = sqlx::query_as(
+                "SELECT r.id,r.due_at,r.timezone,m.valid_until FROM reminder_tasks r
+                 JOIN morning_offer_reminder_items i ON i.reminder_id=r.id
+                 JOIN morning_offers m ON m.id=i.offer_id
+                 WHERE i.offer_id=$1 AND i.kind='today' AND r.user_id=$2 AND NOT r.completed
+                     AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.selected_until IS NULL
+                 ORDER BY r.id FOR UPDATE OF r",
             )
             .bind(id)
             .bind(user_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+            .fetch_all(&mut *tx)
+            .await?;
+            for (reminder, event, timezone, until) in reminders {
+                let zone = super::maintenance::timezone(&timezone)?;
+                let expiry = crate::planning::at(
+                    zone,
+                    event.with_timezone(&zone).date_naive().succ_opt().unwrap(),
+                    2,
+                )
+                .min(until);
+                count += sqlx::query("UPDATE reminder_tasks SET selected_until=$2 WHERE id=$1")
+                    .bind(reminder)
+                    .bind(expiry)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+            }
         }
         sqlx::query("UPDATE morning_offers SET state = $2, backlog_ready = true WHERE id = $1")
             .bind(id)

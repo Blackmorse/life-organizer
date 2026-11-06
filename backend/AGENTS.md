@@ -25,6 +25,11 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Task completion/restoration is implemented. Completed tasks form a read-only
   archive; restore before editing, moving, changing subtasks, or deleting.
 - Database migrations run automatically before the server accepts requests.
+- PostgreSQL is storage-only: no application-defined functions, procedures, or
+  triggers remain after migration `0018_backend_owned_logic.sql`. Rust owns
+  calendar rules, rollover preservation, occurrence generation, morning preparation,
+  reminder selection expiry, and subtask validation. Keep keys, foreign keys,
+  indexes, defaults, and declarative storage constraints in PostgreSQL.
 - Category-free scheduled tasks use required weekday schedules and saved IANA
   timezones, with independently completable daily occurrences and optional subtasks.
 - Telegram Mini App authentication verifies signed `initData` on every API request.
@@ -58,6 +63,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/telegram/voice.rs` | Telegram getFile resolution and bounded in-memory audio download. |
 | `src/dao/backlog.rs`, `src/service/backlog.rs` | Owned, urgency-ordered unfinished ordinary work outside today's picks. |
 | `src/dao/morning.rs` | Morning-offer storage, claiming, ownership checks, atomic acceptance, and polling offset. |
+| `src/dao/maintenance.rs` | Explicit transactional rollover, recurring snapshot generation, and morning-offer preparation. |
+| `src/planning.rs` | IANA timezone validation and local-calendar reset/offer rules, including DST wall-time resolution. |
 | `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
 | `src/dao/reminder.rs`, `src/service/reminder.rs`, `src/api/reminder.rs` | One-time reminders, exact date/time validation, owned CRUD, completion, and daily removal. |
 | `src/service/notification.rs` | Transport-independent message sender boundary and daily summary formatting. |
@@ -100,8 +107,9 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
   `0004_task_subtasks.sql` originally introduced `TEXT[]` steps;
   `0006_subtask_completion.sql` converts existing text to objects, preserving order
   and duplicates, with `completed: false`. Parent completion state is preserved.
-  A database check enforces an array of objects with these required fields and
-  optional string `id`, nonblank descriptions, and boolean flags.
+  Backend deserialization and service validation enforce objects with these fields,
+  optional string `id`, nonblank descriptions, and boolean flags. PostgreSQL checks
+  the array container; it does not run custom validation functions.
   SQLx uses `Json<Vec<Subtask>>`.
   Subtasks may have a stable task-owned string `id`, assigned lazily on first
   daily selection. Clients must preserve returned IDs on edits and reordering;
@@ -199,7 +207,7 @@ subtasks selects every current step instead of the parent; completed flags are
 preserved. Tasks without steps select the parent. Bulk selection assigns any
 missing stable IDs atomically, replaces a legacy whole-task pick, and upserts
 steps without duplicates. The backend
-validates the timezone against PostgreSQL's timezone catalog, locks the owned
+validates the timezone with Rust's bundled `chrono-tz` IANA database, locks the owned
 active parent, assigns stable step IDs if needed, and upserts picks.
 Missing/inaccessible tasks or steps return `404`; archived parents return `409`.
 Daily DELETE JSON: `{"task_id":1,"subtask_id":""}` removes all picks for that task,
@@ -208,7 +216,7 @@ completion. Inputs reject unknown fields. Responses are arrays of
 `{task_id, subtask_id, expires_at}`, where `expires_at` is Unix milliseconds.
 Migration `0007_daily_tasks.sql` adds the daily table and optional step identities.
 Expiry is the next local 02:00 at selection time; calendar-day arithmetic handles
-DST (PostgreSQL standard-time resolution for missing/ambiguous wall times).
+DST (matching PostgreSQL: pre-transition offset for gaps, later instant for overlaps).
 Reads exclude expired picks even when no app was running and lazily clean them.
 Completed picks remain visible until removed/reset. Deleted tasks cascade-delete
 picks; removed steps drop their picks atomically during subtask replacement.
@@ -405,7 +413,7 @@ category records. Template POST/PUT example:
 
 Weekdays are distinct ISO day numbers (Monday=1 through Sunday=7), with at least
 one required; all seven means every day. Timezone is required and validated
-against PostgreSQL's timezone catalog. Subtasks default to an empty list.
+against Rust's bundled IANA database. Subtasks default to an empty list.
 Scheduled tasks have no urgency; migration `0010_scheduled_tasks_without_urgency.sql`
 removes urgency from templates and occurrences while preserving existing progress.
 Templates return the input fields plus generated `id`.
@@ -415,8 +423,8 @@ when not generated yet. Listing templates never creates or selects occurrences.
 Template step flags are normalized to false; step IDs are not accepted.
 Descriptions and step descriptions must be nonblank. Unknown fields are rejected.
 
-`generate_scheduled_occurrences(owner_id, instant)` generates only the current
-planning day, using `daily_reset_at` and local calendar dates (including DST).
+`dao::maintenance::generate_scheduled_at` generates only the current
+planning day, using `planning::daily_reset` and local calendar dates (including DST).
 Planning days start at 02:00; before then, the previous weekday still applies.
 An occurrence snapshots description, timezone, and steps, all initially unchecked.
 New occurrences are unselected candidates, absent from daily reads and summaries
@@ -467,7 +475,7 @@ and durable `morning_offer_reminder_items` links. POST/PUT input:
 `{"description":"Dentist","due_at":1804516200000,"timezone":"Europe/Berlin"}`.
 `due_at` is a required exact instant in Unix milliseconds (1970 through 9998),
 not a naive local datetime. The frontend converts device-local input to an instant;
-timezone is validated against PostgreSQL. No categories, urgency, or subtasks.
+timezone is validated with `chrono-tz`. No categories, urgency, or subtasks.
 Unknown fields and blank descriptions are rejected. Responses add `id`,
 `completed`, and nullable `expires_at` (Unix milliseconds of daily selection expiry).
 Responses also include nullable `available_today_until`: the end of the saved-zone
@@ -483,7 +491,7 @@ Completion takes `{"completed":true}` or false and preserves selection and detai
 Completed reminders remain editable/reopenable in their own list; ordinary-task
 archive rules do not apply. All operations are scoped to authenticated ownership.
 
-`prepare_reminder_morning_offers(instant)` joins the same owner/timezone/reset
+`dao::maintenance::prepare_reminders_at` joins the same owner/timezone/reset
 morning groups as existing offers. Reminder calendar dates use the saved timezone,
 including DST and times before 02:00; unlike recurring schedules, an event at 00:30
 belongs to its calendar date. The previous date's 08:00 message lists tomorrow's
@@ -504,8 +512,9 @@ ownership, idempotent decisions and durable delivery state apply. Restart catche
 up still-valid morning groups only, without backfilling missed dates. A tomorrow
 notice is suppressed once that event date has started.
 
-Migration `0016_missed_reminders.sql` caps existing and future daily reminder
-selections at the event date's following local 02:00, including DST. Reminder API
+Migration `0016_missed_reminders.sql` caps existing daily reminder selections;
+backend manual selection and morning acceptance enforce the same event date's
+following local 02:00 boundary after migration 0018, including DST. Reminder API
 responses expose expired selections as `expires_at: null` immediately; the worker
 also clears expired selection storage, preserving the reminder and its progress.
 At the next date's 08:00, morning messages include an informational note naming
@@ -524,13 +533,13 @@ reuse daily selection validation, ownership, archive rejection, bulk selection,
 and removal through `DailyService` and `PgDailyDao::tomorrow`. POST/DELETE bodies
 match daily bodies; responses are `{task_id, subtask_id, expires_at}[]`. Here
 `expires_at` is the target calendar date's 02:00 handoff instant in Unix
-milliseconds, not the end of an accepted daily pick. `tomorrow_reset_at` uses the
+milliseconds, not the end of an accepted daily pick. `planning::tomorrow_reset` uses the
 next local calendar date even when selection happens before 02:00, including DST.
 Tomorrow picks never appear in today's reads, `/today`, or finalized summaries.
 
 The worker sweeps expired tomorrow rows before other morning preparation; lazy
-reads and expired-pick replacement also preserve work through the existing
-`preserve_expired_daily_pick` trigger. At handoff, unfinished owned picks enter
+reads, removal, and expired-pick replacement also preserve work explicitly through
+`dao::maintenance::expire_picks` in the same transaction. At handoff, unfinished owned picks enter
 the same owner/timezone/reset morning group and deduplicate against carryover.
 An offer is created even with only tomorrow picks. Its 08:00 delivery, Yes/No
 decision, live completion/deletion filtering, stable step links, expiry, retry,
@@ -541,7 +550,7 @@ Expired missed dates are not backfilled. Reopen/Refresh loads bot-accepted picks
 
 Migration `0008_morning_offers.sql` stores the IANA timezone on each daily pick.
 Legacy picks fall back to UTC; selecting them again records the current device
-timezone. A database trigger captures unfinished picks when expired rows are
+timezone. Backend rollover captures unfinished picks before expired rows are
 deleted or replaced, including lazy API cleanup and selection before the sweep.
 Removed active picks do not create offers. `morning_offers` groups by owner,
 timezone, and reset instant; `morning_offer_items` retains stable task/step links.
@@ -549,7 +558,7 @@ This preserves yesterday's work without keeping it in today's active list.
 
 At 08:00 local time on the reset date, the bot sends the still-unfinished work
 and any linked scheduled candidates due that day
-with Yes/No inline buttons. Local calendar arithmetic and PostgreSQL timezone
+with Yes/No inline buttons. Rust local-calendar arithmetic and IANA timezone
 rules apply, including DST. Completed/deleted work is filtered again before
 delivery and acceptance. Empty offers send nothing. Yes atomically adds eligible
 picks with their next local 02:00 expiry; already-active picks keep their expiry.
@@ -646,6 +655,11 @@ ownership checks must apply when the frontend loads the destination.
 - Keep core domain and application logic independent of HTTP, Telegram, and PostgreSQL details.
 - API handlers and bot interactions must reuse the same application logic.
 - Keep persistence, API transport, and Telegram integration in separate modules.
+- Do not add application-defined database functions, procedures, or triggers.
+  Update Rust application/DAO logic and transactional call paths instead. Historical
+  migrations retain former definitions for checksum-compatible upgrades; migration
+  0018 removes them. Upgrade with old backend instances stopped so no old writer
+  calls removed functions or bypasses the new explicit rollover handling.
 - Prefer clear module boundaries within this crate; introduce additional crates only when justified.
 - Share one connection pool. Enforce relationships in PostgreSQL rather than
   relying on existence checks that can race with concurrent writes.

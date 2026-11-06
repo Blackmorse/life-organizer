@@ -17,6 +17,48 @@ use testcontainers::{
     runners::AsyncRunner,
 };
 
+pub async fn timestamp(db: &TestDb, value: &str) -> chrono::DateTime<chrono::Utc> {
+    sqlx::query_scalar("SELECT $1::text::timestamptz")
+        .bind(value)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+pub async fn clock(db: &TestDb) -> chrono::DateTime<chrono::Utc> {
+    backend::dao::maintenance::now(&mut db.pool.acquire().await.unwrap())
+        .await
+        .unwrap()
+}
+
+pub async fn generate_at(db: &TestDb, value: &str) {
+    backend::dao::maintenance::generate_scheduled_at(
+        &db.pool,
+        Some(db.user.id),
+        timestamp(db, value).await,
+    )
+    .await
+    .unwrap();
+}
+
+pub async fn backlog_at(db: &TestDb, value: &str) {
+    backend::dao::maintenance::prepare_backlog_at(&db.pool, timestamp(db, value).await)
+        .await
+        .unwrap();
+}
+
+pub async fn scheduled_at(db: &TestDb, value: &str) {
+    backend::dao::maintenance::prepare_scheduled_at(&db.pool, timestamp(db, value).await)
+        .await
+        .unwrap();
+}
+
+pub async fn reminders_at(db: &TestDb, value: &str) {
+    backend::dao::maintenance::prepare_reminders_at(&db.pool, timestamp(db, value).await)
+        .await
+        .unwrap();
+}
+
 pub struct TestDb {
     pub pool: PgPool,
     pub user: User,

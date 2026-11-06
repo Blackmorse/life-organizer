@@ -7,6 +7,7 @@ pub mod dao;
 pub mod db;
 pub mod domain;
 pub mod morning;
+pub mod planning;
 pub mod service;
 pub mod speech;
 pub mod task_assistant;

@@ -275,12 +275,7 @@ async fn generation_obeys_planning_days_dst_and_resets_progress_without_backfill
         "2026-10-27T00:59:00Z",
         "2026-10-27T01:00:00Z",
     ] {
-        sqlx::query("SELECT generate_scheduled_occurrences($1, $2::text::timestamptz)")
-            .bind(db.user.id)
-            .bind(instant)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        support::generate_at(&db, instant).await;
     }
     let dates: Vec<String> = sqlx::query_scalar(
         "SELECT planning_date::text FROM scheduled_occurrences ORDER BY planning_date",
@@ -293,11 +288,7 @@ async fn generation_obeys_planning_days_dst_and_resets_progress_without_backfill
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("SELECT generate_scheduled_occurrences($1, '2026-10-28T12:00:00Z')")
-        .bind(db.user.id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::generate_at(&db, "2026-10-28T12:00:00Z").await;
     let flags: Vec<bool> =
         sqlx::query_scalar("SELECT completed FROM scheduled_occurrences ORDER BY planning_date")
             .fetch_all(&db.pool)
@@ -309,11 +300,7 @@ async fn generation_obeys_planning_days_dst_and_resets_progress_without_backfill
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("SELECT generate_scheduled_occurrences($1, '2026-03-29T00:59:00Z')")
-        .bind(db.user.id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::generate_at(&db, "2026-03-29T00:59:00Z").await;
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM scheduled_occurrences WHERE planning_date='2026-03-29'",
     )
@@ -321,11 +308,7 @@ async fn generation_obeys_planning_days_dst_and_resets_progress_without_backfill
     .await
     .unwrap();
     assert_eq!(count, 0);
-    sqlx::query("SELECT generate_scheduled_occurrences($1, '2026-03-29T01:00:00Z')")
-        .bind(db.user.id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::generate_at(&db, "2026-03-29T01:00:00Z").await;
     let expiry: String = sqlx::query_scalar("SELECT to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM scheduled_occurrences WHERE planning_date='2026-03-29'").fetch_one(&db.pool).await.unwrap();
     assert_eq!(expiry, "2026-03-30 00:00");
     let steps: sqlx::types::Json<Vec<Subtask>> = sqlx::query_scalar(
@@ -557,7 +540,8 @@ async fn morning_opt_in_migration_preserves_existing_daily_progress_but_not_futu
     // Seed the version-10 shape directly; the current DAO includes newer columns.
     sqlx::query("INSERT INTO scheduled_tasks(user_id, description, weekdays, timezone, subtasks) VALUES ($1, 'Sport exercises', ARRAY[1,2,3,4,5,6,7]::smallint[], 'Europe/Berlin', '[{\"description\":\"Warm up\",\"completed\":false},{\"description\":\"Run\",\"completed\":false}]')")
         .bind(db.user.id).execute(&db.pool).await.unwrap();
-    backend::dao::generate_scheduled(&db.pool, None)
+    sqlx::query("SELECT generate_scheduled_occurrences(NULL, statement_timestamp())")
+        .execute(&db.pool)
         .await
         .unwrap();
     sqlx::query("UPDATE scheduled_occurrences SET completed=true, subtasks='[{\"description\":\"Run\",\"completed\":true}]'")
@@ -567,11 +551,11 @@ async fn morning_opt_in_migration_preserves_existing_daily_progress_but_not_futu
     assert_eq!(current.len(), 1);
     assert!(current[0].completed);
     assert!(current[0].subtasks[0].completed);
-    sqlx::query(
-        "SELECT generate_scheduled_occurrences($1, statement_timestamp() + interval '1 day')",
+    backend::dao::maintenance::generate_scheduled_at(
+        &db.pool,
+        Some(db.user.id),
+        support::clock(&db).await + chrono::Duration::days(1),
     )
-    .bind(db.user.id)
-    .execute(&db.pool)
     .await
     .unwrap();
     let flags: Vec<bool> =

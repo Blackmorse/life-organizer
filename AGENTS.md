@@ -68,6 +68,14 @@ startup. Database-backed integration tests use a fresh Testcontainers PostgreSQL
 container per test. Backend-specific architecture, API contract, testing rules,
 and build/run/test commands live in `backend/AGENTS.md`.
 
+PostgreSQL serves as data storage, with keys, foreign keys, indexes, defaults, and
+declarative constraints. Application-defined database functions, procedures, and
+triggers are removed by migration `0018_backend_owned_logic.sql`. Rust owns
+calendar/timezone rules, rollover preservation, recurring snapshots, morning-offer
+preparation, reminder expiry, and subtask validation. Explicit backend transactions
+preserve expired picks before cleanup or replacement. See `backend/AGENTS.md` for
+module boundaries and upgrade guidance.
+
 `frontend/` is a React/TypeScript/Vite app using Material UI, with a read-first,
 searchable category/task hierarchy, CRUD, task reassignment, and urgency
 selection/badges, and ordered subtask editing/reordering with completion checkboxes

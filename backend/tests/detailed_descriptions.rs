@@ -41,18 +41,14 @@ async fn upgrade_defaults_existing_work_and_validates_optional_step_notes() {
         (json!({}), false),
     ] {
         let steps = json!([{"description":"Step","completed":false,"detailed_description":notes}]);
-        let result: bool = sqlx::query_scalar("SELECT valid_task_subtasks($1)")
-            .bind(&steps)
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-        assert_eq!(result, valid);
-        let write = sqlx::query("UPDATE tasks SET subtasks=$2 WHERE id=$1")
-            .bind(id)
-            .bind(&steps)
-            .execute(&db.pool)
-            .await;
-        assert_eq!(write.is_ok(), valid);
+        let parsed = serde_json::from_value::<Vec<backend::domain::Subtask>>(steps);
+        assert_eq!(parsed.is_ok(), valid);
+        if let Ok(steps) = parsed {
+            db.task_service()
+                .replace_subtasks(id, &steps)
+                .await
+                .unwrap();
+        }
     }
     // Future snapshots copy notes; migration never rewrites today's snapshot.
     sqlx::query("UPDATE scheduled_tasks SET detailed_description='Future notes' WHERE id=$1")
@@ -60,11 +56,11 @@ async fn upgrade_defaults_existing_work_and_validates_optional_step_notes() {
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query(
-        "SELECT generate_scheduled_occurrences($1, statement_timestamp() + interval '1 day')",
+    backend::dao::maintenance::generate_scheduled_at(
+        &db.pool,
+        Some(db.user.id),
+        support::clock(&db).await + chrono::Duration::days(1),
     )
-    .bind(db.user.id)
-    .execute(&db.pool)
     .await
     .unwrap();
     let notes: Vec<String> = sqlx::query_scalar(

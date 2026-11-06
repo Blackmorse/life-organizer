@@ -5,6 +5,7 @@ mod daily;
 pub mod daily_work;
 mod reminder;
 pub use reminder::{PgReminderDao, ReminderDao};
+pub mod maintenance;
 pub mod morning;
 mod scheduled;
 mod task;

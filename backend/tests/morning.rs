@@ -140,16 +140,14 @@ async fn tomorrow_uses_next_calendar_date_before_two_and_across_dst() {
         ("America/New_York", "2026-10-31T12:00Z", "2026-11-01T07:00Z"),
         ("Asia/Kathmandu", "2026-10-29T18:30Z", "2026-10-30T20:15Z"),
     ] {
-        let correct: bool = sqlx::query_scalar(
-            "SELECT tomorrow_reset_at($1, $2::text::timestamptz)=$3::text::timestamptz",
-        )
-        .bind(zone)
-        .bind(instant)
-        .bind(expected)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-        assert!(correct, "{zone} at {instant}");
+        assert_eq!(
+            backend::planning::tomorrow_reset(
+                backend::planning::zone(zone).unwrap(),
+                support::timestamp(&db, instant).await
+            ),
+            support::timestamp(&db, expected).await,
+            "{zone} at {instant}"
+        );
     }
 }
 
@@ -188,9 +186,17 @@ async fn morning_schedule_uses_local_calendar_across_dst_and_fractional_offsets(
             "2026-10-29T20:15:00Z",
         ),
     ] {
-        let correct: bool = sqlx::query_scalar("SELECT due_at = $3::text::timestamptz AND valid_until = $4::text::timestamptz FROM morning_offer_schedule($1, $2::text::timestamptz)")
-            .bind(zone).bind(reset).bind(due).bind(until).fetch_one(&db.pool).await.unwrap();
-        assert!(correct, "wrong schedule for {zone}, reset {reset}");
+        assert_eq!(
+            backend::planning::morning_schedule(
+                backend::planning::zone(zone).unwrap(),
+                support::timestamp(&db, reset).await
+            ),
+            (
+                support::timestamp(&db, due).await,
+                support::timestamp(&db, until).await
+            ),
+            "wrong schedule for {zone}, reset {reset}"
+        );
     }
 }
 
@@ -217,8 +223,12 @@ async fn expiry_preserves_unfinished_picks_even_with_lazy_cleanup_and_new_select
         picks.select(id, step, "Asia/Kathmandu").await.unwrap();
     }
     // Existing whole-task picks from before subtask expansion still carry over.
-    sqlx::query("INSERT INTO daily_tasks(task_id, subtask_id, expires_at, timezone) VALUES ($1, '', daily_reset_at('Asia/Kathmandu', statement_timestamp()), 'Asia/Kathmandu')")
-        .bind(id).execute(&db.pool).await.unwrap();
+    let reset = backend::planning::daily_reset(
+        backend::planning::zone("Asia/Kathmandu").unwrap(),
+        support::clock(&db).await,
+    );
+    sqlx::query("INSERT INTO daily_tasks(task_id, subtask_id, expires_at, timezone) VALUES ($1, '', $2, 'Asia/Kathmandu')")
+        .bind(id).bind(reset).execute(&db.pool).await.unwrap();
     picks.select(done, None, "Asia/Kathmandu").await.unwrap();
     db.tasks().set_completed(done, true).await.unwrap();
     expire(&db).await;
@@ -315,9 +325,18 @@ async fn yes_revalidates_live_work_preserves_new_picks_and_is_user_scoped_and_id
             .subtask_id,
         steps[0].id.as_ref().unwrap().as_str()
     );
-    let expiry_correct: bool = sqlx::query_scalar("SELECT expires_at = daily_reset_at(timezone, statement_timestamp()) FROM daily_tasks WHERE subtask_id <> ''")
-        .fetch_one(&db.pool).await.unwrap();
-    assert!(expiry_correct);
+    let (zone, expiry): (String, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT timezone,expires_at FROM daily_tasks WHERE subtask_id <> ''")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        expiry,
+        backend::planning::daily_reset(
+            backend::planning::zone(&zone).unwrap(),
+            support::clock(&db).await
+        )
+    );
     assert_eq!(
         store.decide(offer, TELEGRAM_ID, true).await.unwrap(),
         Decision::Unavailable
@@ -1172,11 +1191,7 @@ async fn backlog_without_offer_uses_local_eight_and_retries_durably_with_live_fi
         "2026-03-29T02:15:00Z",
         "2026-03-29T03:00:00Z",
     ] {
-        sqlx::query("SELECT prepare_backlog_morning_offers($1::text::timestamptz)")
-            .bind(instant)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        support::backlog_at(&db, instant).await;
         let count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM morning_offers WHERE state='pending'")
                 .fetch_one(&db.pool)
@@ -1255,19 +1270,13 @@ async fn multiple_due_timezone_groups_wait_for_all_choices_and_share_one_backlog
 async fn backlog_morning_defaults_to_utc_and_uses_dst_calendar_dates_without_backfill() {
     let db = TestDb::new().await;
     task(&db, "Plan").await;
-    sqlx::query("SELECT prepare_backlog_morning_offers('2026-03-08T07:59:59Z')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::backlog_at(&db, "2026-03-08T07:59:59Z").await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
         .fetch_one(&db.pool)
         .await
         .unwrap();
     assert_eq!(count, 0);
-    sqlx::query("SELECT prepare_backlog_morning_offers('2026-03-08T08:00:00Z')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::backlog_at(&db, "2026-03-08T08:00:00Z").await;
     let zone: String = sqlx::query_scalar("SELECT timezone FROM morning_offers")
         .fetch_one(&db.pool)
         .await
@@ -1278,19 +1287,13 @@ async fn backlog_morning_defaults_to_utc_and_uses_dst_calendar_dates_without_bac
         .await
         .unwrap();
     // Fall-back day: local 08:00 is 13:00 UTC, not yesterday's UTC offset.
-    sqlx::query("SELECT prepare_backlog_morning_offers('2026-11-01T12:59:59Z')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::backlog_at(&db, "2026-11-01T12:59:59Z").await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
         .fetch_one(&db.pool)
         .await
         .unwrap();
     assert_eq!(count, 1);
-    sqlx::query("SELECT prepare_backlog_morning_offers('2026-11-01T13:00:00Z')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::backlog_at(&db, "2026-11-01T13:00:00Z").await;
     let valid: bool = sqlx::query_scalar("SELECT timezone='America/New_York' AND due_at='2026-11-01T13:00Z' AND valid_until='2026-11-02T07:00Z' FROM morning_offers WHERE state='pending'").fetch_one(&db.pool).await.unwrap();
     assert!(valid);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
@@ -1373,8 +1376,12 @@ async fn scheduled_and_carryover_share_offer_and_no_keeps_both_out_of_daily_list
     let ordinary = task(&db, "Carry me").await;
     daily(&db).select(ordinary, None, "UTC").await.unwrap();
     // Expire at today's real reset so ordinary and scheduled work share a group.
-    sqlx::query("UPDATE daily_tasks SET expires_at = ((daily_reset_at('UTC', statement_timestamp()) AT TIME ZONE 'UTC')::date - 1 + time '02:00') AT TIME ZONE 'UTC'")
-        .execute(&db.pool).await.unwrap();
+    let day = backend::planning::planning_date(chrono_tz::UTC, support::clock(&db).await);
+    sqlx::query("UPDATE daily_tasks SET expires_at = $1")
+        .bind(backend::planning::at(chrono_tz::UTC, day, 2))
+        .execute(&db.pool)
+        .await
+        .unwrap();
     schedule(&db, "Scheduled").await;
     backend::dao::generate_scheduled(&db.pool, None)
         .await
@@ -1454,17 +1461,8 @@ async fn scheduled_offers_follow_due_weekdays_dst_and_snapshot_timezone_without_
         .bind(id).execute(&db.pool).await.unwrap();
     // Missing local 02:00 becomes 03:00 on spring-forward Sunday.
     for instant in ["2026-03-29T00:59:00Z", "2026-03-29T01:00:00Z"] {
-        sqlx::query("SELECT generate_scheduled_occurrences($1, $2::text::timestamptz)")
-            .bind(db.user.id)
-            .bind(instant)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        sqlx::query("SELECT prepare_scheduled_morning_offers($1::text::timestamptz)")
-            .bind(instant)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        support::generate_at(&db, instant).await;
+        support::scheduled_at(&db, instant).await;
     }
     let schedule: (String, String, String) = sqlx::query_as("SELECT to_char(reset_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), to_char(valid_until AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM morning_offers")
         .fetch_one(&db.pool).await.unwrap();
@@ -1480,25 +1478,15 @@ async fn scheduled_offers_follow_due_weekdays_dst_and_snapshot_timezone_without_
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("SELECT prepare_scheduled_morning_offers('2026-03-29T07:00:00Z')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::scheduled_at(&db, "2026-03-29T07:00:00Z").await;
     let zones: Vec<String> = sqlx::query_scalar("SELECT timezone FROM morning_offers")
         .fetch_all(&db.pool)
         .await
         .unwrap();
     assert_eq!(zones, vec!["Europe/Berlin"]);
     // Monday is not due. Expired Sunday work must not produce another offer.
-    sqlx::query("SELECT generate_scheduled_occurrences($1, '2026-03-30T12:00:00Z')")
-        .bind(db.user.id)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("SELECT prepare_scheduled_morning_offers('2026-03-30T12:00:00Z')")
-        .execute(&db.pool)
-        .await
-        .unwrap();
+    support::generate_at(&db, "2026-03-30T12:00:00Z").await;
+    support::scheduled_at(&db, "2026-03-30T12:00:00Z").await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
         .fetch_one(&db.pool)
         .await
