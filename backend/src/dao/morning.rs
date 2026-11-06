@@ -70,6 +70,29 @@ impl MorningStore {
         let Some((id, recipient)) = row else {
             return Ok(None);
         };
+        self.load(id, recipient).await.map(Some)
+    }
+
+    /// Resending keeps the original IDs and decisions; it never reopens an
+    /// answered offer or changes its expiry or automatic delivery lease.
+    pub async fn unanswered(&self, telegram_id: i64) -> Result<Vec<MorningOffer>, sqlx::Error> {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT o.id FROM morning_offers o JOIN users u ON u.id=o.user_id
+             WHERE u.telegram_id=$1 AND o.state IN ('pending', 'sent') AND NOT o.backlog_ready
+                 AND o.due_at <= statement_timestamp() AND o.valid_until > statement_timestamp()
+             ORDER BY o.due_at, o.id",
+        )
+        .bind(telegram_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut offers = Vec::new();
+        for id in ids {
+            offers.push(self.load(id, telegram_id).await?);
+        }
+        Ok(offers)
+    }
+
+    async fn load(&self, id: i64, recipient: i64) -> Result<MorningOffer, sqlx::Error> {
         let rows: Vec<MorningSummaryRow> = sqlx::query_as(
             "SELECT t.id, c.description, t.description, s.step->>'description', COALESCE(s.position, 0), c.id
              FROM morning_offer_items i JOIN morning_offers o ON o.id = i.offer_id
@@ -139,13 +162,13 @@ impl MorningStore {
                 yesterday.push(item);
             }
         }
-        Ok(Some(MorningOffer {
+        Ok(MorningOffer {
             id,
             recipient,
             items,
             tomorrow,
             yesterday,
-        }))
+        })
     }
 
     pub async fn sent(&self, id: i64) -> Result<(), sqlx::Error> {

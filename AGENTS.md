@@ -92,6 +92,12 @@ and polls messages alongside callbacks. Commands reuse user-scoped daily logic.
 An advisory lock selects one worker. Subcategories and implementation
 plans are not implemented yet.
 
+Morning suggestions and informational reminder notes share one message per offer
+when they fit Telegram's size limit, with the selection question and Yes/No
+buttons at the end. `/morning` resends due, unexpired, unanswered offers with live
+filtering and original decision IDs; it never reopens answered offers or selects
+tasks automatically. Empty `/today` replies point users to `/morning`.
+
 Private-chat voice recordings are transcribed through a provider-neutral
 `SpeechRecognizer`. OpenAI is the initial provider, implemented
 as a custom `langchain-rust` Tool using `gpt-4o-mini-transcribe`; startup requires
@@ -163,7 +169,7 @@ Reminders never recur or carry over. Rescheduling clears daily selection and old
 buttons cannot select changed dates/timezones. Completed reminders remain in their
 own tab and can be reopened. No separate event-time alert is sent.
 Reminder selection expires at the following calendar day's 02:00 in its saved
-timezone, whether completed or not. The next 08:00 morning message ends with an
+timezone, whether completed or not. The next 08:00 morning message includes an
 informational note naming yesterday's unfinished reminders, without offering to
 carry them over. The note also sends when no tasks need selection; completed,
 deleted, and rescheduled reminders are filtered before delivery.

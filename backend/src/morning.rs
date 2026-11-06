@@ -6,7 +6,7 @@ use crate::{
         PgBacklogDao,
         morning::{Decision, MorningStore},
     },
-    service::{BacklogService, MessageSender, NotificationError, ServiceError, summary_messages},
+    service::{BacklogService, MessageSender, NotificationError, ServiceError, morning_messages},
     speech::{SpeechError, SpeechRecognizer},
     task_assistant::VoiceAssistant,
 };
@@ -88,29 +88,7 @@ impl MorningWorker {
             let Some(offer) = self.store.claim().await? else {
                 break;
             };
-            let mut messages = if offer.tomorrow.is_empty() {
-                Vec::new()
-            } else {
-                summary_messages(
-                    &offer.tomorrow,
-                    "Note: tomorrow there are scheduled one-time tasks",
-                    "These reminders are for tomorrow; they are not added to today's list.",
-                )
-            };
-            if !offer.items.is_empty() {
-                messages.extend(summary_messages(
-                    &offer.items,
-                    "Suggested tasks for today: planned tasks, scheduled work, reminders and unfinished daily picks",
-                    "Add these tasks to Tasks of the day?",
-                ));
-            }
-            if !offer.yesterday.is_empty() {
-                messages.extend(summary_messages(
-                    &offer.yesterday,
-                    "Note: you haven't completed these reminder tasks from yesterday",
-                    "These reminders are not added to today's list.",
-                ));
-            }
+            let messages = morning_messages(&offer.items, &offer.tomorrow, &offer.yesterday);
             if !offer.items.is_empty() {
                 self.bot.offer(offer.recipient, offer.id, &messages).await?;
             } else if !messages.is_empty() {

@@ -497,6 +497,126 @@ fn command(id: i64, sender: i64, private_chat: Option<i64>, text: &str) -> BotUp
 }
 
 #[tokio::test]
+async fn morning_command_resends_live_unanswered_offer_and_original_buttons_stay_idempotent() {
+    let db = TestDb::new().await;
+    let id = task(&db, "Keep <&>").await;
+    let removed = task(&db, "Deleted after first message").await;
+    let completed = task(&db, "Completed after first message").await;
+    for task_id in [id, removed, completed] {
+        daily(&db).select(task_id, None, "UTC").await.unwrap();
+    }
+    expire(&db).await;
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let offer_id = due(&db).await;
+    let bot = Arc::new(FakeBot::default());
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    worker.deliver_due().await.unwrap();
+    db.tasks().delete(removed).await.unwrap();
+    db.tasks().set_completed(completed, true).await.unwrap();
+    bot.updates.lock().unwrap().extend([
+        command(1, TELEGRAM_ID, Some(TELEGRAM_ID), "/morning"),
+        command(1, TELEGRAM_ID, Some(TELEGRAM_ID), "/morning"),
+    ]);
+    worker.poll().await.unwrap();
+    {
+        let offers = bot.offers.lock().unwrap();
+        assert_eq!(offers.len(), 2);
+        assert_eq!(offers[1].0, TELEGRAM_ID);
+        assert_eq!(offers[1].1, offer_id);
+        assert_eq!(offers[1].2.len(), 1);
+        let text = offers[1].2.concat();
+        assert!(text.contains("Keep &lt;&amp;&gt;"));
+        assert!(!text.contains("Deleted after"));
+        assert!(!text.contains("Completed after"));
+    }
+    assert!(daily(&db).list().await.unwrap().is_empty());
+    assert_eq!(
+        store.decide(offer_id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(1)
+    );
+    assert_eq!(
+        store.decide(offer_id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Unavailable
+    );
+    bot.updates
+        .lock()
+        .unwrap()
+        .push(command(2, TELEGRAM_ID, Some(TELEGRAM_ID), "/morning"));
+    worker.poll().await.unwrap();
+    assert_eq!(bot.offers.lock().unwrap().len(), 2);
+    assert!(
+        bot.messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, text)| text.concat().contains("No unanswered morning offer"))
+    );
+    assert_eq!(daily(&db).list().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn morning_command_filters_private_owner_due_expiry_and_decision_and_can_retry_delivery() {
+    let db = TestDb::new().await;
+    let id = task(&db, "Private offer").await;
+    daily(&db).select(id, None, "UTC").await.unwrap();
+    expire(&db).await;
+    let store = MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    let offer_id = due(&db).await;
+    let bot = Arc::new(FakeBot::default());
+    let worker = MorningWorker::new(db.pool.clone(), bot.clone());
+    bot.updates.lock().unwrap().extend([
+        command(1, TELEGRAM_ID, Some(-1), "/morning"),
+        command(2, TELEGRAM_ID + 1, Some(TELEGRAM_ID + 1), "/morning"),
+        command(3, TELEGRAM_ID, Some(TELEGRAM_ID), "/morning@bot"),
+    ]);
+    worker.poll().await.unwrap();
+    assert!(bot.offers.lock().unwrap().is_empty());
+    assert_eq!(bot.messages.lock().unwrap().len(), 1);
+    let mut update_id = 4;
+    for sql in [
+        "UPDATE morning_offers SET due_at=statement_timestamp()+interval '1 hour'",
+        "UPDATE morning_offers SET due_at=statement_timestamp()-interval '1 hour', valid_until=statement_timestamp()-interval '1 second'",
+        "UPDATE morning_offers SET valid_until=statement_timestamp()+interval '1 hour', state='declined'",
+    ] {
+        sqlx::query(sql).execute(&db.pool).await.unwrap();
+        bot.updates.lock().unwrap().push(command(
+            update_id,
+            TELEGRAM_ID,
+            Some(TELEGRAM_ID),
+            "/morning",
+        ));
+        worker.poll().await.unwrap();
+        assert!(bot.offers.lock().unwrap().is_empty());
+        update_id += 1;
+    }
+    sqlx::query("UPDATE morning_offers SET state='pending'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    *bot.fail.lock().unwrap() = true;
+    bot.updates.lock().unwrap().push(command(
+        update_id,
+        TELEGRAM_ID,
+        Some(TELEGRAM_ID),
+        "/morning",
+    ));
+    worker.poll().await.unwrap();
+    assert_eq!(store.offset().await.unwrap(), update_id + 1);
+    assert_eq!(bot.offers.lock().unwrap().len(), 1);
+    *bot.fail.lock().unwrap() = false;
+    bot.updates.lock().unwrap().extend([
+        command(update_id, TELEGRAM_ID, Some(TELEGRAM_ID), "/morning"),
+        command(update_id + 1, TELEGRAM_ID, Some(TELEGRAM_ID), "/morning"),
+    ]);
+    worker.poll().await.unwrap();
+    assert_eq!(bot.offers.lock().unwrap().len(), 2);
+    assert_eq!(bot.offers.lock().unwrap()[1].1, offer_id);
+    assert!(daily(&db).list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn replacement_bot_has_independent_cursor_and_start_is_not_replayed() {
     let db = TestDb::new().await;
     let first = Arc::new(FakeBot {

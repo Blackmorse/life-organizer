@@ -530,7 +530,7 @@ async fn relative_reminder(db: &TestDb, zone: &str, days: i32, name: &str) -> i6
 }
 
 #[tokio::test]
-async fn missed_reminder_note_ends_morning_message_without_restoring_yesterdays_work() {
+async fn missed_reminder_note_shares_one_morning_message_without_restoring_yesterdays_work() {
     for with_today in [false, true] {
         let db = TestDb::new().await;
         let zone = morning_zone(&db).await;
@@ -554,6 +554,11 @@ async fn missed_reminder_note_ends_morning_message_without_restoring_yesterdays_
         let offers = bot.offers.lock().unwrap().clone();
         assert_eq!(offers.len(), usize::from(with_today));
         let text = if with_today {
+            assert_eq!(
+                offers[0].len(),
+                1,
+                "Short morning sections must share one message"
+            );
             offers[0].concat()
         } else {
             bot.messages.lock().unwrap().concat()
@@ -562,13 +567,14 @@ async fn missed_reminder_note_ends_morning_message_without_restoring_yesterdays_
         assert!(text.contains("Missed &lt;&amp;&gt;"));
         assert!(!text.contains("Already done"));
         assert!(!text.contains("Older missed work"));
-        assert!(text.ends_with("These reminders are not added to today's list."));
+        assert!(text.contains("These reminders are not added to today's list."));
         assert_eq!(text.contains("Add these tasks"), with_today);
         if with_today {
             assert!(
                 text.find("Add these tasks").unwrap()
-                    < text.find("Note: you haven't completed").unwrap()
+                    > text.find("Note: you haven't completed").unwrap()
             );
+            assert!(text.ends_with("Use /morning to show this offer again."));
             let id: i64 = sqlx::query_scalar("SELECT id FROM morning_offers WHERE state='sent'")
                 .fetch_one(&db.pool)
                 .await

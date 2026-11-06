@@ -257,6 +257,7 @@ mod tests {
                 "scope":{"type":"all_private_chats"},
                 "commands":[
                     {"command":"today","description":"Show current Tasks of the day"},
+                    {"command":"morning","description":"Resend unanswered morning offer"},
                     {"command":"remind","description":"Show unfinished tasks outside today's list"},
                     {"command":"help","description":"Show available commands"},
                     {"command":"start","description":"Get started with Scheduler"}

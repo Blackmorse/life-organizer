@@ -50,7 +50,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/telegram.rs` | Outbound Telegram Bot API adapter, bounded requests, sanitized delivery errors. |
 | `src/telegram/morning.rs` | Morning-offer buttons, command-menu registration, message/callback polling and acknowledgements. |
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
-| `src/bot_commands.rs` | Private-chat `/today`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
+| `src/bot_commands.rs` | Private-chat `/today`, `/morning`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
 | `src/bot_voice.rs` | Private-chat voice transcription and shared text/voice assistant replies, escaping and splitting. |
 | `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion/creation tools. |
 | `src/dao/daily_work.rs`, `src/service/daily_work.rs` | Current daily action identities and guarded atomic completion across ordinary, scheduled, and reminder work. |
@@ -252,6 +252,11 @@ not block the bot. No additional token or chat-ID environment variable is needed
   scheduled occurrences, using the same category hierarchy, completion flags,
   escaping, and message splitting as Mini App finalization. Empty lists get a
   short reply explaining how to add work. It does not select or complete tasks.
+- `/morning` resends still-valid, due, unanswered morning offers with their original
+  Yes/No buttons and live task descriptions. Completed/deleted work is filtered;
+  accepted, declined, expired, future, and informational-only groups are excluded.
+  Resending does not select work or extend expiry; old and new buttons share the
+  same idempotent decision. No available offer gets a short explanatory reply.
 - `/remind` sends unfinished ordinary tasks outside Tasks of the day, ordered
   Soon → Upcoming → Someday, then category ID and task ID within each urgency.
   Icon-marked urgency headings contain indented category headings with task names
@@ -260,7 +265,7 @@ not block the bot. No additional token or chat-ID environment variable is needed
   including an individual subtask, excludes that entire task. Expired picks do
   not exclude it. Completed, scheduled, and reminder tasks never appear. An empty
   backlog gets a short reply. This command changes no picks or progress.
-- `/start` and `/help` explain `/today` and `/remind` and direct users to the Mini App for edits.
+- `/start` and `/help` explain `/today`, `/morning`, and `/remind` and direct users to the Mini App for edits.
 - The elected worker registers these commands with Telegram's `setMyCommands`
   using `all_private_chats` scope at startup. Registration failure is logged
   without stopping typed commands; restarting retries menu setup.
@@ -271,6 +276,7 @@ not block the bot. No additional token or chat-ID environment variable is needed
   ignored rather than passed to the assistant.
 - Commands reuse `DailyService::current_messages` and the owned daily DAO.
   `/remind` reuses `BacklogService::current_messages` and the owned backlog DAO.
+  `/morning` reuses `MorningStore` and the shared morning message formatter.
   Their update offset is persisted before reply delivery to avoid replaying
   commands after a storage or delivery failure. A crash between persistence and
   delivery can lose a reply; send the command again to retry.
@@ -480,7 +486,7 @@ Migration `0016_missed_reminders.sql` caps existing and future daily reminder
 selections at the event date's following local 02:00, including DST. Reminder API
 responses expose expired selections as `expires_at: null` immediately; the worker
 also clears expired selection storage, preserving the reminder and its progress.
-At the next date's 08:00, morning messages end with an informational note naming
+At the next date's 08:00, morning messages include an informational note naming
 yesterday's unfinished reminders, including ones not accepted into the daily list.
 Durable `yesterday` offer links reuse delivery leases and sent-state deduplication.
 They are never accepted by Yes or carried into today's list. Note-only mornings
@@ -530,6 +536,13 @@ offers expire at the following local 02:00 and cannot be accepted afterward.
 Task locks serialize acceptance with app edits/completion. Only the owning user's
 callback from their private chat is accepted, using identity returned by Telegram.
 Reopen or refresh the Mini App to load picks restored through the bot.
+
+Today's suggestions, tomorrow's reminder notices, and yesterday's missed-reminder
+note share one HTML message per offer when they fit. Longer content splits only
+at Telegram's 4096 rendered UTF-16-unit limit. The final chunk always ends with
+the selection question and Yes/No buttons, explicitly applying to today's
+suggestions; informational reminder sections are never selected. `/morning`
+resends this same combined format if the first offer was skipped.
 
 The backend starts a worker automatically with the existing bot token. It sweeps
 every 30 seconds and polls `getUpdates` every 2 seconds for `callback_query` and

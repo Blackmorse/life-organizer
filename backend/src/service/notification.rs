@@ -81,6 +81,52 @@ pub(crate) fn summary_messages(
     title: &str,
     footer: &str,
 ) -> Vec<String> {
+    let mut html = HtmlMessages::default();
+    append_summary(&mut html, items, title, footer);
+    html.flush();
+    html.messages
+}
+
+/// Keep notices and the actionable offer together, splitting only at Telegram's
+/// size limit. The final question always accompanies the Yes/No buttons.
+pub(crate) fn morning_messages(
+    items: &[DailyTaskSummary],
+    tomorrow: &[DailyTaskSummary],
+    yesterday: &[DailyTaskSummary],
+) -> Vec<String> {
+    let mut html = HtmlMessages::default();
+    for (section, title, footer) in [
+        (
+            tomorrow,
+            "Note: tomorrow there are scheduled one-time tasks",
+            "These reminders are for tomorrow; they are not added to today's list.",
+        ),
+        (
+            items,
+            "Suggested tasks for today: planned tasks, scheduled work, reminders and unfinished daily picks",
+            "",
+        ),
+        (
+            yesterday,
+            "Note: you haven't completed these reminder tasks from yesterday",
+            "These reminders are not added to today's list.",
+        ),
+    ] {
+        if !section.is_empty() {
+            if !html.current.is_empty() {
+                html.append("\n\n", false);
+            }
+            append_summary(&mut html, section, title, footer);
+        }
+    }
+    if !items.is_empty() {
+        html.append("\n\nAdd these tasks from Suggested tasks for today to Tasks of the day? Use /morning to show this offer again.", false);
+    }
+    html.flush();
+    html.messages
+}
+
+fn append_summary(html: &mut HtmlMessages, items: &[DailyTaskSummary], title: &str, footer: &str) {
     let mut categories = std::collections::BTreeMap::<
         (DailyTaskSource, Option<i64>),
         std::collections::BTreeMap<i64, Vec<&DailyTaskSummary>>,
@@ -93,7 +139,6 @@ pub(crate) fn summary_messages(
             .or_default()
             .push(item);
     }
-    let mut html = HtmlMessages::default();
     html.append(title, true);
     html.append("\n\n", false);
     for ((source, _), groups) in categories {
@@ -124,8 +169,6 @@ pub(crate) fn summary_messages(
         }
     }
     html.append(footer, false);
-    html.flush();
-    html.messages
 }
 
 // NBSP indentation survives Telegram rendering; continuation lines stay nested.
@@ -193,6 +236,55 @@ impl HtmlMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn morning_sections_share_one_message_with_unambiguous_final_choice() {
+        let item = |task: &str| DailyTaskSummary {
+            source: DailyTaskSource::Reminder,
+            task_id: 1,
+            category_id: None,
+            category: String::new(),
+            task: task.into(),
+            subtask: None,
+            completed: false,
+        };
+        let messages = morning_messages(
+            &[item("Today <&>")],
+            &[item("Tomorrow")],
+            &[item("Yesterday")],
+        );
+        assert_eq!(messages.len(), 1);
+        let text = &messages[0];
+        assert!(text.contains("Today &lt;&amp;&gt;"));
+        assert!(text.find("Yesterday").unwrap() < text.find("Add these tasks").unwrap());
+        assert!(text.ends_with("Use /morning to show this offer again."));
+        assert!(!text.contains("Progress today:"));
+
+        let messages = morning_messages(&[item(&"😀<&>".repeat(3000))], &[], &[item("Yesterday")]);
+        assert!(messages.len() > 1);
+        for text in &messages {
+            let rendered = text
+                .replace("<b>", "")
+                .replace("</b>", "")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&");
+            assert!(rendered.encode_utf16().count() <= 4096);
+            assert_eq!(text.matches("<b>").count(), text.matches("</b>").count());
+        }
+        assert!(
+            messages
+                .last()
+                .unwrap()
+                .contains("Add these tasks from Suggested tasks for today")
+        );
+        assert!(morning_messages(&[], &[], &[]).is_empty());
+        assert!(
+            !morning_messages(&[], &[], &[item("Yesterday")])
+                .concat()
+                .contains("Add these tasks")
+        );
+    }
 
     #[test]
     fn backlog_nests_categories_under_urgency_and_tasks_under_categories() {

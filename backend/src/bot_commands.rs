@@ -1,7 +1,8 @@
 //! Private-chat commands resolve live, user-scoped daily work and backlog.
 use crate::{
-    dao::{PgBacklogDao, PgDailyDao, PgUserDao},
-    service::{BacklogService, DailyService, MessageSender, ServiceError},
+    dao::{PgBacklogDao, PgDailyDao, PgUserDao, morning::MorningStore},
+    morning::MorningBot,
+    service::{BacklogService, DailyService, ServiceError, morning_messages},
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -25,18 +26,36 @@ impl BotCommands {
     pub async fn handle(
         &self,
         message: &BotMessage,
-        sender: &(impl MessageSender + ?Sized),
+        sender: &(impl MorningBot + ?Sized),
     ) -> Result<(), ServiceError> {
         if message.sender <= 0 || message.private_chat != Some(message.sender) {
             return Ok(());
         }
         let messages = match message.text.split_whitespace().next() {
+            Some("/morning") => {
+                let store = MorningStore::new(self.pool.clone());
+                let offers = store.unanswered(message.sender).await.map_err(crate::dao::DaoError::from)?;
+                let mut sent = false;
+                for offer in offers {
+                    if offer.items.is_empty() {
+                        continue;
+                    }
+                    let messages = morning_messages(&offer.items, &offer.tomorrow, &offer.yesterday);
+                    sender.offer(message.sender, offer.id, &messages).await?;
+                    store.sent(offer.id).await.map_err(crate::dao::DaoError::from)?;
+                    sent = true;
+                }
+                if sent {
+                    return Ok(());
+                }
+                vec!["No unanswered morning offer is available. Offers appear at 08:00 and expire at the next local 02:00. Use /today to check your current list or the Mini App to add tasks.".into()]
+            }
             Some("/today") => {
                 let user = PgUserDao::new(self.pool.clone()).get_or_create(message.sender).await?;
                 let daily = DailyService::new(Arc::new(PgDailyDao::new(self.pool.clone(), user.id)));
                 let messages = daily.current_messages().await?;
                 if messages.is_empty() {
-                    vec!["No tasks in Tasks of the day yet. Open the Mini App to add tasks, or accept a morning offer. Use /today to check again.".into()]
+                    vec!["No tasks in Tasks of the day yet. Use /morning to show an unanswered morning offer, or open the Mini App to add tasks. Use /today to check again.".into()]
                 } else {
                     messages
                 }
@@ -52,7 +71,7 @@ impl BotCommands {
                 }
             }
             Some("/start" | "/help") => vec![
-                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Send a text or voice message to list today's tasks or mark a task/subtask done, for example: 'Mark buy groceries completed'. Include the full name and category if names overlap. Each message is independent. Manage tasks and progress in the Mini App.".into(),
+                "Use /today to show your current Tasks of the day, including accepted scheduled tasks. Use /morning to resend an unanswered morning offer with Yes/No buttons. Use /remind to show unfinished ordinary tasks outside today's list, most urgent first. Send a text or voice message to list today's tasks or mark a task/subtask done, for example: 'Mark buy groceries completed'. Include the full name and category if names overlap. Each message is independent. Manage tasks and progress in the Mini App.".into(),
             ],
             _ => return Ok(()),
         };
