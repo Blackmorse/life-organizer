@@ -15,16 +15,28 @@ pub struct DailyWork {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyMove {
+    pub date: String,
+    pub timezone: String,
+}
+
 #[async_trait]
 pub trait DailyWorkDao: Send + Sync {
     async fn list(&self) -> Result<Vec<DailyWork>, DaoError>;
     /// False means the listed item changed, expired, or is no longer selected.
     async fn complete(&self, listed: &DailyWork) -> Result<bool, DaoError>;
+    async fn move_to_date(
+        &self,
+        listed: &DailyWork,
+        date: &str,
+        timezone: Option<&str>,
+    ) -> Result<Option<DailyMove>, DaoError>;
 }
 
 pub struct PgDailyWorkDao {
-    pool: PgPool,
-    user_id: i64,
+    pub(super) pool: PgPool,
+    pub(super) user_id: i64,
 }
 
 impl PgDailyWorkDao {
@@ -35,6 +47,14 @@ impl PgDailyWorkDao {
 
 #[async_trait]
 impl DailyWorkDao for PgDailyWorkDao {
+    async fn move_to_date(
+        &self,
+        listed: &DailyWork,
+        date: &str,
+        timezone: Option<&str>,
+    ) -> Result<Option<DailyMove>, DaoError> {
+        self.move_daily(listed, date, timezone).await
+    }
     async fn list(&self) -> Result<Vec<DailyWork>, DaoError> {
         // Context parents are actionable too: completing one archives the task,
         // exactly like the Mini App's parent completion control.

@@ -42,6 +42,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown, signal?:
 }
 
 export const api = {
+  moveDailyTask: (id: string, date: string) => request<{ date: string, timezone: string }>('/daily-tasks/move', 'POST', { id, date, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
   listReminders: (signal?: AbortSignal) => request<ReminderTask[]>('/reminder-tasks', 'GET', undefined, signal),
   saveReminder: (input: ReminderTaskInput, id?: number) => request<ReminderTask>(id === undefined ? '/reminder-tasks' : `/reminder-tasks/${id}`, id === undefined ? 'POST' : 'PUT', input),
   deleteReminder: (id: number) => request<void>(`/reminder-tasks/${id}`, 'DELETE'),

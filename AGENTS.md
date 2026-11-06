@@ -125,7 +125,7 @@ parent. Ambiguous matches request a new recording with full name/category.
 After a successful voice completion, the bot sends the live, shared daily summary
 with updated completion marks. Summary-load or delivery failure preserves progress;
 `/today` retries the summary without repeating the mutation.
-Each recording is independent and can complete or create one item; unrelated speech is echoed.
+Each recording is independent and can complete, create, or move one item; unrelated speech is echoed.
  Non-command private-chat text enters the same assistant flow directly, as if
 already transcribed, with identical completion and creation guards, replies, and
 daily summaries.
@@ -235,6 +235,14 @@ hosting.
 
 Tasks of the day are implemented: users select whole active tasks or individual
 subtasks with calendar buttons, then track completion in a dedicated tab.
+Daily ordinary tasks, selected task groups, and individual steps have a **Move to
+another day** menu with Tomorrow and Select date. Moves atomically remove today's
+selection and save unfinished selected work for the chosen date's 08:00 Yes/No
+offer, preserving original progress and stable IDs. Future plans suppress backlog
+reminders until their handoff. Reminder moves reschedule the actual reminder date,
+preserving saved local time/timezone and clearing daily selection. Scheduled work
+cannot move. Text/voice requests share the same guarded move application logic;
+the assistant must list today's work before moving an exact returned ID.
 Separate calendar **+1** buttons plan ordinary tasks/subtasks for tomorrow without
 changing today's picks. Parent selection uses all current steps, as for today.
 Tomorrow means the next calendar date in the device IANA timezone captured on add,

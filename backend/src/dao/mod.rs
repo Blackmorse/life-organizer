@@ -2,6 +2,7 @@ mod backlog;
 mod category;
 pub use backlog::{BacklogDao, PgBacklogDao};
 mod daily;
+mod daily_move;
 pub mod daily_work;
 mod reminder;
 pub use reminder::{PgReminderDao, ReminderDao};
@@ -19,6 +20,8 @@ pub use user::PgUserDao;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaoError {
+    #[error("{0}")]
+    InvalidMove(&'static str),
     #[error("subtask IDs must be unique and belong to the task")]
     InvalidSubtaskIds,
     #[error("category does not exist")]

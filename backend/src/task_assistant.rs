@@ -2,7 +2,7 @@
 use crate::{
     dao::{
         PgCategoryDao, PgDailyDao, PgTaskDao, PgUserDao,
-        daily_work::{DailyWork, PgDailyWorkDao},
+        daily_work::{DailyMove, DailyWork, PgDailyWorkDao},
     },
     domain::{Category, Subtask, Task, TaskUrgency},
     service::{CategoryService, DailyService, DailyWorkService, ServiceError, TaskService},
@@ -35,6 +35,12 @@ fn assistant_task(task: &Task) -> Value {
 }
 
 const PROMPT: &str = "You handle typed text and transcribed voice requests for a personal task organizer. \
+To move/defer/reschedule daily work, first list_tasks_of_the_day, then use move_task_of_the_day \
+with an exact listed id and date 'tomorrow' or an explicit YYYY-MM-DD date. Only move when explicitly \
+requested. If a date is ambiguous or relative other than tomorrow, ask for an exact date; never guess \
+the year or timezone. Ordinary parent moves only currently selected work; a named step moves only \
+that step. Reminders are rescheduled keeping local time and saved timezone. Scheduled work cannot \
+be moved. Moving does not complete work. \
 Use list_tasks_of_the_day when the user wants today's list or says they finished / want to mark \
 a daily task completed. Before completing, ALWAYS list current work, match the user's meaning \
 to the actual task/subtask descriptions and category, then call complete_task_of_the_day with \
@@ -56,7 +62,7 @@ the user's language, plain text. Each message is independent; no previous conver
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
-    "Could not process the request. Before retrying, check /today for completion changes and the task/category list in the Mini App for created tasks or added subtasks."
+    "Could not process the request. Before retrying, check /today for completion or move changes and the task/category list in the Mini App for created tasks or added subtasks. Check the Reminders tab for rescheduled reminders."
 )]
 pub struct AssistantError;
 
@@ -139,7 +145,7 @@ async fn reply_with_daily_summary(
                 reply.text.push_str("\nNo tasks currently in Tasks of the day.");
             }
             Ok(messages) => reply.daily_messages = messages,
-            Err(_) => reply.text.push_str("\nCompletion saved, but the updated daily list could not be loaded. Use /today to retry."),
+            Err(_) => reply.text.push_str("\nChange saved, but the updated daily list could not be loaded. Use /today to retry."),
         }
     }
     reply
@@ -148,6 +154,10 @@ async fn reply_with_daily_summary(
 /// A committed mutation, answered from server state.
 #[derive(Clone)]
 enum Outcome {
+    Moved {
+        item: DailyWork,
+        destination: DailyMove,
+    },
     Completed(DailyWork),
     CreatedTask {
         task: Task,
@@ -163,6 +173,19 @@ enum Outcome {
 impl Outcome {
     fn reply(&self) -> (String, bool) {
         match self {
+            Self::Moved { item, destination } => (
+                format!(
+                    "Moved: {}{} — {} ({}). The bot will offer it at 08:00.",
+                    item.task,
+                    item.subtask
+                        .as_ref()
+                        .map(|step| format!(" → {step}"))
+                        .unwrap_or_default(),
+                    destination.date,
+                    destination.timezone
+                ),
+                true,
+            ),
             Self::Completed(item) => (
                 format!(
                     "Completed: {}{}",
@@ -218,6 +241,7 @@ struct ToolState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolKind {
+    MoveDaily,
     ListDaily,
     CompleteDaily,
     ListCategories,
@@ -235,6 +259,13 @@ struct AssistantTool {
 #[serde(deny_unknown_fields)]
 struct CompleteInput {
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveInput {
+    id: String,
+    date: String,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +302,7 @@ fn mutation_error(error: ServiceError) -> Option<Value> {
 impl Tool for AssistantTool {
     fn name(&self) -> String {
         match self.kind {
+            ToolKind::MoveDaily => "move_task_of_the_day",
             ToolKind::ListDaily => "list_tasks_of_the_day",
             ToolKind::CompleteDaily => "complete_task_of_the_day",
             ToolKind::ListCategories => "list_categories",
@@ -283,6 +315,7 @@ impl Tool for AssistantTool {
 
     fn description(&self) -> String {
         match self.kind {
+            ToolKind::MoveDaily => "Move explicitly requested unfinished daily ordinary work to a future 08:00 offer, or reschedule a reminder preserving saved local time/timezone. Requires exact id from list_tasks_of_the_day. date is tomorrow or explicit YYYY-MM-DD. Scheduled work cannot move.",
             ToolKind::CompleteDaily => "Mark one explicitly requested daily task or subtask completed by its exact id from the listing tool. Never guess an id.",
             ToolKind::ListDaily => "List ALL currently selected Tasks of the day with exact ids, task names, category, optional subtask and completion state. Parents and selected steps have separate ids.",
             ToolKind::ListCategories => "List ALL task categories with their exact numeric ids and names. Required before create_task to obtain a valid category_id.",
@@ -294,6 +327,9 @@ impl Tool for AssistantTool {
 
     fn parameters(&self) -> Value {
         match self.kind {
+            ToolKind::MoveDaily => {
+                json!({"type":"object","properties":{"id":{"type":"string"},"date":{"type":"string","description":"tomorrow or an explicit future YYYY-MM-DD date"}},"required":["id","date"],"additionalProperties":false})
+            }
             ToolKind::CompleteDaily => {
                 json!({"type":"object", "properties":{"id":{"type":"string"}}, "required":["id"], "additionalProperties":false})
             }
@@ -320,6 +356,44 @@ impl Tool for AssistantTool {
 
     async fn run(&self, input: Value) -> Result<String, Box<dyn Error>> {
         let output = match self.kind {
+            ToolKind::MoveDaily => {
+                let Ok(input) = serde_json::from_value::<MoveInput>(input) else {
+                    return Ok(json!({"error":"Expected an exact listed id and date (tomorrow or YYYY-MM-DD)."}).to_string());
+                };
+                let item = self
+                    .state
+                    .listed
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|items| items.iter().find(|item| item.id == input.id))
+                    .cloned();
+                let Some(item) = item else {
+                    return Ok(
+                        json!({"error":"List today's tasks first; use only an exact returned id."})
+                            .to_string(),
+                    );
+                };
+                match self
+                    .state
+                    .daily
+                    .move_to_date(&item, &input.date, None)
+                    .await
+                {
+                    Ok(destination) => {
+                        let output = json!({"moved":true,"item":item,"destination":destination});
+                        *self.state.outcome.lock().await =
+                            Some(Outcome::Moved { item, destination });
+                        output
+                    }
+                    Err(error) => {
+                        return match mutation_error(error) {
+                            Some(error) => Ok(error.to_string()),
+                            None => Err(AssistantError.into()),
+                        };
+                    }
+                }
+            }
             ToolKind::CompleteDaily => {
                 let Ok(input) = serde_json::from_value::<CompleteInput>(input) else {
                     return Ok(
@@ -519,6 +593,7 @@ async fn conversation(
 ) -> Result<(String, bool), AssistantError> {
     let tools: Vec<Arc<dyn Tool>> = [
         ToolKind::ListDaily,
+        ToolKind::MoveDaily,
         ToolKind::CompleteDaily,
         ToolKind::ListCategories,
         ToolKind::ListTasks,
@@ -661,7 +736,7 @@ mod tests {
         let reply =
             reply_with_daily_summary(("Completed: Deploy backend".into(), true), &failing).await;
         assert!(reply.text.starts_with("Completed: Deploy backend"));
-        assert!(reply.text.contains("Completion saved"));
+        assert!(reply.text.contains("Change saved"));
         assert!(reply.text.contains("/today"));
         assert!(reply.daily_messages.is_empty());
 
@@ -701,6 +776,18 @@ mod tests {
 
     #[async_trait]
     impl DailyWorkDao for WorkStore {
+        async fn move_to_date(
+            &self,
+            listed: &DailyWork,
+            date: &str,
+            _: Option<&str>,
+        ) -> Result<Option<DailyMove>, DaoError> {
+            self.writes.lock().unwrap().push(listed.id.clone());
+            Ok((!self.unavailable).then(|| DailyMove {
+                date: date.into(),
+                timezone: "UTC".into(),
+            }))
+        }
         async fn list(&self) -> Result<Vec<DailyWork>, DaoError> {
             Ok(vec![item()])
         }
@@ -946,6 +1033,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lists_then_moves_daily_work_and_blocks_unlisted_moves() {
+        for listed in [true, false] {
+            let mut replies = vec![];
+            if listed {
+                replies.push(call("list_tasks_of_the_day", json!({})));
+            }
+            replies.push(call(
+                "move_task_of_the_day",
+                json!({"id": item().id, "date":"tomorrow"}),
+            ));
+            if !listed {
+                replies.push(json!({"role":"assistant","content":"Please identify the task."}));
+            }
+            let server = model_server(replies).await;
+            let store = Arc::new(WorkStore::default());
+            let response = conversation(
+                &server.model,
+                state(
+                    store.clone(),
+                    Arc::new(CategoryStore::default()),
+                    Arc::new(TaskStore::default()),
+                ),
+                "Move deploying the backend to tomorrow",
+            )
+            .await
+            .unwrap();
+            assert_eq!(store.writes.lock().unwrap().len(), usize::from(listed));
+            assert_eq!(response.1, listed);
+            if listed {
+                assert!(response.0.contains("Moved: Release <app> → Deploy backend"));
+                assert!(response.0.contains("08:00"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn lists_then_completes_exact_returned_id_with_native_langchain_tools() {
         let server = model_server(vec![
             call("list_tasks_of_the_day", json!({})),
@@ -973,7 +1096,7 @@ mod tests {
         assert_eq!(*store.writes.lock().unwrap(), [item().id]);
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 7);
         assert_eq!(requests[1]["messages"][2]["role"], "assistant");
         assert_eq!(requests[1]["messages"][3]["role"], "tool");
         let result: Value =

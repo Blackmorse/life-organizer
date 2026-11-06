@@ -37,6 +37,7 @@ pub enum ServiceError {
 impl From<DaoError> for ServiceError {
     fn from(error: DaoError) -> Self {
         match error {
+            DaoError::InvalidMove(message) => Self::InvalidInput(message),
             DaoError::InvalidSubtaskIds => {
                 Self::InvalidInput("subtask IDs must be unique and belong to the task")
             }

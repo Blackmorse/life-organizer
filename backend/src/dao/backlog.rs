@@ -26,8 +26,10 @@ impl BacklogDao for PgBacklogDao {
             "SELECT t.description, c.id, c.description, t.urgency
              FROM tasks t JOIN categories c ON c.id=t.category_id
              WHERE c.user_id=$1 AND NOT t.completed
-                 AND NOT EXISTS (SELECT 1 FROM daily_tasks d
-                     WHERE d.task_id=t.id AND d.expires_at > statement_timestamp())
+                  AND NOT EXISTS (SELECT 1 FROM daily_tasks d
+                      WHERE d.task_id=t.id AND d.expires_at > statement_timestamp())
+                  AND NOT EXISTS (SELECT 1 FROM tomorrow_tasks p
+                      WHERE p.task_id=t.id AND p.expires_at > statement_timestamp())
              ORDER BY CASE t.urgency WHEN 'soon' THEN 0 WHEN 'upcoming' THEN 1 ELSE 2 END, c.id, t.id",
         )
         .bind(self.user_id)

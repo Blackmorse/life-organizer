@@ -37,7 +37,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 - Private-chat voice messages are transcribed through a provider-neutral
   `SpeechRecognizer`, currently backed by a custom `langchain-rust` OpenAI tool.
   A LangChain tool-calling assistant can list today's work, complete a requested
-  task/subtask, and create ordinary tasks or append subtasks; `OPENAI_KEY` is
+  task/subtask, move daily work, and create ordinary tasks or append subtasks; `OPENAI_KEY` is
   required at startup for transcription and chat.
 - Daily-list finalization sends a summary to the verified user's private Telegram
   chat through the existing bot token, using reqwest with rustls. A background
@@ -57,7 +57,8 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/morning.rs` | Morning-offer orchestration, periodic delivery, command dispatch, durable update processing, singleton worker lifecycle. |
 | `src/bot_commands.rs` | Private-chat `/today`, `/morning`, `/remind`, `/start`, and `/help` commands using user-scoped application services. |
 | `src/bot_voice.rs` | Private-chat voice transcription and shared text/voice assistant replies, escaping and splitting. |
-| `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion/creation tools. |
+| `src/task_assistant.rs` | Provider-neutral voice assistant, bounded LangChain conversation, owned listing/completion/creation/move tools. |
+| `src/dao/daily_move.rs` | Atomic daily-work deferral and reminder rescheduling shared by API and assistant. |
 | `src/dao/daily_work.rs`, `src/service/daily_work.rs` | Current daily action identities and guarded atomic completion across ordinary, scheduled, and reminder work. |
 | `src/speech.rs`, `src/speech/openai.rs` | Provider-neutral speech boundary and custom LangChain OpenAI transcription tool. |
 | `src/telegram/voice.rs` | Telegram getFile resolution and bounded in-memory audio download. |
@@ -176,6 +177,7 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | POST | `/daily-tasks` | Select all task subtasks (or the task if none), or one subtask; return current picks (`200`). |
 | DELETE | `/daily-tasks` | Remove one step or all picks for a task; return current picks (`200`). |
 | POST | `/daily-tasks/finalize` | Send the current daily list to the verified user's private bot chat (`204`). |
+| POST | `/daily-tasks/move` | Atomically defer selected ordinary work or reschedule a selected reminder (`200`). |
 | POST | `/categories` | Create category (`201`). |
 | GET | `/categories` | List categories ordered by ID (`200`). |
 | GET | `/categories/{id}` | Read category (`200`). |
@@ -274,7 +276,8 @@ not block the bot. No additional token or chat-ID environment variable is needed
   no subtasks are shown. Any unexpired pick for a task,
   including an individual subtask, excludes that entire task. Expired picks do
   not exclude it. Completed, scheduled, and reminder tasks never appear. An empty
-  backlog gets a short reply. This command changes no picks or progress.
+  backlog gets a short reply. Future planned tasks are excluded until their 02:00
+  handoff. This command changes no picks or progress.
 - `/start` and `/help` explain `/today`, `/morning`, and `/remind` and direct users to the Mini App for edits.
 - The elected worker registers these commands with Telegram's `setMyCommands`
   using `all_private_chats` scope at startup. Registration failure is logged
@@ -293,8 +296,38 @@ not block the bot. No additional token or chat-ID environment variable is needed
 
 ### Text/voice requests and task tools
 
+Daily moves use `DailyWorkService::move_to_date` and `dao/daily_move.rs`, shared
+with the Mini App. `POST /daily-tasks/move` accepts
+`{"id":"task:1","date":"tomorrow","timezone":"Europe/Berlin"}` or a future
+`YYYY-MM-DD`; timezone is optional. It returns `{date, timezone}`. Ordinary work
+uses the supplied timezone, or its saved daily-pick timezone for bot requests.
+Reminder moves always use the reminder's saved timezone and preserve its local
+time, with the shared DST overlap/gap resolution. Dates must be strictly after
+the local calendar date, through year 9998. Invalid dates/timezones return `400`;
+missing, stale, expired, completed or inaccessible targets cannot move. Scheduled
+occurrences cannot move. The server resolves the ID from owned daily work, then
+rechecks descriptions, ownership, completion, and live selection under locks.
+
+Moving an ordinary context parent moves only currently selected unfinished picks,
+not unselected steps; completed picks are removed from today but not replanned.
+Moving a step affects only that stable ID. Future plans reuse `tomorrow_tasks`,
+with the chosen date's 02:00 handoff instead of necessarily tomorrow. Existing
+plans for the same pick are replaced. Earlier morning-offer links are removed
+atomically so old buttons cannot restore it early. `/tomorrow-tasks` GET returns
+only next-calendar-day plans in each saved timezone, keeping +1 highlights exact.
+Future planned tasks are excluded from backlog reminders until handoff. Usual
+morning delivery, live filtering, Yes/No acceptance, expiry and downtime rules apply.
+Reminder moves update `due_at` and clear selection atomically; ordinary reminder
+day-before notices and same-day offers apply, and old date snapshots cannot accept.
+
+`move_task_of_the_day({"id":"...","date":"tomorrow"})` is the seventh assistant
+tool. It requires an exact ID returned by this message's daily listing and explicit
+move intent. An explicit future `YYYY-MM-DD` is also accepted; ambiguous relative
+dates require clarification rather than guessed dates, years or timezones. Success
+uses server-backed confirmation with target date/timezone and the updated daily list.
+
 Send a text or recorded voice message in the bot's private chat to list today's work,
-mark a named task/subtask completed, create a new ordinary task with optional steps,
+mark a named task/subtask completed, move selected work to a future date, create a new ordinary task with optional steps,
 or add a step to an existing active task. Nonblank text that does not start with `/`
 (after leading whitespace) goes directly to the same `VoiceAssistant` used after
 transcription, with the original text and verified sender. Text needs no audio
@@ -321,7 +354,7 @@ Audio, transcripts, provider response bodies, and credentials are not logged.
 
 For typed text or after transcription, `VoiceAssistant` resolves the user from the Telegram sender
 and starts an independent `langchain-rust` conversation using OpenAI `gpt-4o-mini`
-and the same `OPENAI_KEY`. The model receives six native function tools:
+and the same `OPENAI_KEY`. The model receives seven native function tools:
 
 - `list_tasks_of_the_day({})` returns all current daily work with task name,
   category, optional step, completion flag and exact string ID. Namespaces are
@@ -374,7 +407,7 @@ lost reply, check `/today` for completion changes and the Mini App's task/catego
 list for created tasks or added subtasks before retrying; new work need not appear
 in `/today`. Error replies include both recovery paths. A read-only reply states
 that no tasks changed.
-Each message can complete or create one item; clarification requires another text or voice message
+Each message can complete, create, or move one item; clarification requires another text or voice message
 with the full task name/category (no conversation history is stored). Audio,
 typed text, transcripts and tool results stay in memory, though OpenAI receives the request text
 and listed daily task data to resolve requests. Tests use local model mocks and

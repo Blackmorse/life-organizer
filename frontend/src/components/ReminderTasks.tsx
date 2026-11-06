@@ -4,6 +4,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import type { ReminderTask, ReminderTaskInput } from '../types'
 import { reminderDate } from '../reminders'
 import { DetailedDescriptionDisclosure } from './DetailedDescription'
+import { MoveDailyButton, type MoveDaily } from './MoveDailyButton'
 
 function localInput(instant: number) {
   const date = new Date(instant)
@@ -65,7 +66,8 @@ export function ReminderTasks({ tasks, query, disabled, onSave, onDelete, onComp
   </Box>
 }
 
-export function ReminderDaily({ task, disabled, onComplete, onDismiss }: {
+export function ReminderDaily({ task, disabled, onComplete, onDismiss, onMove }: {
+  onMove: MoveDaily
   task: ReminderTask, disabled: boolean
   onComplete: (id: number, completed: boolean) => Promise<boolean>
   onDismiss: (id: number) => Promise<boolean>
@@ -78,6 +80,7 @@ export function ReminderDaily({ task, disabled, onComplete, onDismiss }: {
       <DetailedDescriptionDisclosure text={task.detailed_description} label={task.description} />
       <Chip label="Reminder" size="small" variant="outlined" sx={{ alignSelf: 'flex-start', mt: 0.5 }} />
     </Stack>
+    {!task.completed && <MoveDailyButton id={`reminder:${task.id}`} label={task.description} disabled={disabled} onMove={onMove} timezone={task.timezone} reminder />}
     <IconButton aria-label={`Remove from Tasks of the day: ${task.description}`} disabled={disabled} onClick={() => void onDismiss(task.id)}><CloseIcon /></IconButton>
   </ListItem>
 }

@@ -14,6 +14,17 @@ standalone browser.
 
 ## Current functionality
 
+- Tasks of the day has **Move to another day** controls for unfinished ordinary
+  tasks, selected task groups, individual steps, and reminders. A MUI menu offers
+  Tomorrow or Select date; a native date field inside a MUI dialog restricts dates
+  to future calendar days through year 9998. Ordinary moves use device timezone;
+  reminder moves preserve saved local time/timezone and reschedule the actual
+  reminder. The backend atomically removes today's selection and prepares the
+  target date's 08:00 offer. Original ordinary progress stays saved. Scheduled work
+  has no move control. Failed writes retain the date draft and today's rows; saved
+  moves remove rows immediately, then refresh future highlights and reminders.
+  Post-save refresh errors explicitly report that the move was saved.
+
 - Reminder and Scheduled tabs show per-task **Add to today** for unfinished work
   due today and missing from Tasks of the day, plus an **In Tasks of the day** badge
   for selected work. Selection works before 08:00 and after skipped/declined offers
@@ -154,6 +165,7 @@ standalone browser.
 | `src/components/TaskCard.tsx` | Compact task row, expandable read view, and edit/move/delete actions. |
 | `src/components/Subtasks.tsx` | Numbered checklist, progress, direct add, and per-row inline edit/delete/reorder actions. |
 | `src/components/DailyTasks.tsx`, `DailyContext.ts` | Daily checklist, calendar pick controls, and shared selection actions. |
+| `src/components/MoveDailyButton.tsx` | Shared move menu and future-date dialog for daily ordinary work and reminders. |
 | `src/components/ScheduledTasks.tsx`, `ScheduledDaily.tsx` | Recurring-template forms/list and independent daily-occurrence progress. |
 | `src/components/ReminderTasks.tsx`, `src/reminders.ts` | One-time reminder forms/list, daily rows, saved-zone date formatting and expiry normalization. |
 | `src/telegram.ts` | Optional, isolated Telegram SDK bridge. |
@@ -285,6 +297,11 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
   stored picks. Empty lists/unavailable bot chats return `400`; other Telegram
   delivery errors return sanitized `502` text preserved by the client for retry
   guidance. No task completion, expiry, or selection state changes on finalize.
+- `POST /daily-tasks/move` takes `{id, date, timezone}` with a namespaced daily ID
+  (`task:<id>`, `subtask:<task-id>:<stable-id>`, or `reminder:<id>`), date `tomorrow`
+  or `YYYY-MM-DD`, and device IANA timezone. It returns `{date, timezone}`; reminders
+  always use their saved timezone. Group moves affect currently selected picks only.
+  `/tomorrow-tasks` GET returns next-day plans only, excluding later chosen dates.
 - Service errors return `{ "error": "..." }`; extractor failures can be text.
 - Vite starts on `127.0.0.1:5173`, with `strictPort` enabled.
 - `.env.local` can override the proxy target and exact `DEV_ALLOWED_HOST` for a

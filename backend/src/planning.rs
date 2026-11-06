@@ -1,5 +1,5 @@
 //! Calendar rules shared by API writes and background maintenance.
-use chrono::{DateTime, Duration, LocalResult, NaiveDate, Offset, TimeZone, Utc};
+use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 
 pub fn zone(name: &str) -> Result<Tz, chrono_tz::ParseError> {
@@ -10,6 +10,10 @@ pub fn zone(name: &str) -> Result<Tz, chrono_tz::ParseError> {
 /// pre-transition offset during a gap. In particular, never add 24 UTC hours.
 pub fn at(zone: Tz, day: NaiveDate, hour: u32) -> DateTime<Utc> {
     let local = day.and_hms_opt(hour, 0, 0).unwrap();
+    local_instant(zone, local)
+}
+
+pub fn local_instant(zone: Tz, local: NaiveDateTime) -> DateTime<Utc> {
     match zone.from_local_datetime(&local) {
         LocalResult::Single(value) => value.with_timezone(&Utc),
         LocalResult::Ambiguous(a, b) => a.max(b).with_timezone(&Utc),

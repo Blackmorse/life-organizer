@@ -76,6 +76,62 @@ async fn request_as(
 }
 
 #[tokio::test]
+async fn daily_moves_are_authenticated_owned_atomic_and_validate_dates() {
+    use backend::dao::{DailyDao, PgDailyDao};
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Read", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    let daily = PgDailyDao::new(db.pool.clone(), db.user.id);
+    daily.select(task.id, None, "UTC").await.unwrap();
+    let app = db.app();
+    let input = json!({"id":format!("task:{}",task.id),"date":"tomorrow","timezone":"UTC"});
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "POST",
+            "/daily-tasks/move",
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let mut invalid = input.clone();
+    invalid["date"] = json!("2020-01-01");
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks/move", Some(invalid))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(daily.list().await.unwrap().len(), 1);
+    let (status, moved) = request(&app, "POST", "/daily-tasks/move", Some(input.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(moved["timezone"], "UTC");
+    assert!(daily.list().await.unwrap().is_empty());
+    assert_eq!(
+        PgDailyDao::tomorrow(db.pool.clone(), db.user.id)
+            .list()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        request(&app, "POST", "/daily-tasks/move", Some(input))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(!db.task_service().get(task.id).await.unwrap().completed);
+}
+
+#[tokio::test]
 async fn detailed_descriptions_round_trip_default_clear_and_follow_task_guards() {
     let db = TestDb::new().await;
     let category = db.category_service().create("Work").await.unwrap();

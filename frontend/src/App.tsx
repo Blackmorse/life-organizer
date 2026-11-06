@@ -96,7 +96,7 @@ export default function App() {
 
         <Box role="tabpanel" id={`${tab}-panel`} aria-labelledby={`${tab}-tab`} aria-busy={disabled}>
           {tab === 'reminders' ? <ReminderTasks tasks={workspace.reminders} query={query} disabled={disabled} onSave={workspace.saveReminder} onDelete={workspace.deleteReminder} onComplete={workspace.completeReminder} onSelectToday={workspace.selectReminderToday} /> : tab === 'scheduled' ? <ScheduledTasks tasks={workspace.scheduledTasks} daily={workspace.scheduledDaily} query={query} disabled={disabled} onSave={workspace.saveScheduledTask} onDelete={workspace.deleteScheduledTask} onSelectToday={workspace.selectScheduledToday} /> : tab === 'daily' ? <DailyTasks picks={workspace.dailyTasks} tasks={workspace.tasks} categories={workspace.categories} query={query} disabled={disabled}
-            reminders={workspace.reminders} onCompleteReminder={workspace.completeReminder} onDismissReminder={workspace.dismissReminder}
+            reminders={workspace.reminders} onCompleteReminder={workspace.completeReminder} onDismissReminder={workspace.dismissReminder} onMove={workspace.moveDailyTask}
             scheduled={workspace.scheduledDaily} onCompleteScheduled={workspace.completeScheduledDaily} onSubtasksScheduled={workspace.replaceScheduledDailySubtasks} onDismissScheduled={workspace.dismissScheduledDaily}
             onFinalize={workspace.finalizeDailyTasks} onRemove={workspace.removeDailyTask} onSetCompleted={workspace.setCompleted} onReplaceSubtasks={workspace.replaceSubtasks} /> : <>
           <CategoryTree key={tab} categories={workspace.categories} tasks={visibleTasks} query={query} disabled={disabled} archived={archived}

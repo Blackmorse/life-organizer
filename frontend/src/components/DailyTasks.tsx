@@ -9,6 +9,7 @@ import { ScheduledDaily } from './ScheduledDaily'
 import { ReminderDaily } from './ReminderTasks'
 import { reminderDate } from '../reminders'
 import { DetailedDescriptionDisclosure } from './DetailedDescription'
+import { MoveDailyButton, type MoveDaily } from './MoveDailyButton'
 
 import { DailyContext } from './DailyContext'
 
@@ -33,7 +34,8 @@ export function DailyPickButton({ taskId, step, steps = [], index, label, disabl
   </Stack>
 }
 
-export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onSetCompleted, onReplaceSubtasks, scheduled, onCompleteScheduled, onSubtasksScheduled, onDismissScheduled, reminders, onCompleteReminder, onDismissReminder }: {
+export function DailyTasks({ picks, tasks, categories, query, disabled, onFinalize, onRemove, onMove, onSetCompleted, onReplaceSubtasks, scheduled, onCompleteScheduled, onSubtasksScheduled, onDismissScheduled, reminders, onCompleteReminder, onDismissReminder }: {
+  onMove: MoveDaily
   reminders: ReminderTask[]
   onCompleteReminder: (id: number, completed: boolean) => Promise<boolean>
   onDismissReminder: (id: number) => Promise<boolean>
@@ -81,6 +83,7 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
         {!step && <Typography variant="caption" color="text.secondary">{category}</Typography>}
         <DetailedDescriptionDisclosure text={(step ?? task).detailed_description} label={description} />
       </Stack>
+      {!task.completed && !step?.completed && <MoveDailyButton id={step ? `subtask:${task.id}:${pick.subtask_id}` : `task:${task.id}`} label={description} disabled={disabled} onMove={onMove} />}
       <IconButton aria-label={`Remove from Tasks of the day: ${description}`} disabled={disabled} onClick={() => void onRemove(task.id, pick.subtask_id)}><CloseIcon /></IconButton>
     </ListItem>
   return <Box component="section" aria-label="Daily checklist" sx={{ mt: 2 }}>
@@ -94,7 +97,7 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
     </Stack>
     {sent?.picks === picks && sent.tasks === tasks && sent.scheduled === scheduled && sent.reminders === reminders && <Alert severity="success" role="status">Today's tasks sent to your Telegram bot chat.</Alert>}
     <List>
-      {visibleReminders.map((task) => <ReminderDaily key={`reminder-${task.id}`} task={task} disabled={disabled} onComplete={onCompleteReminder} onDismiss={onDismissReminder} />)}
+      {visibleReminders.map((task) => <ReminderDaily key={`reminder-${task.id}`} task={task} disabled={disabled} onComplete={onCompleteReminder} onDismiss={onDismissReminder} onMove={onMove} />)}
       {visibleScheduled.map((item) => <ScheduledDaily key={`scheduled-${item.id}`} item={item} disabled={disabled} onComplete={onCompleteScheduled} onSubtasks={onSubtasksScheduled} onDismiss={onDismissScheduled} />)}
       {[...groups.entries()].map(([taskId, group]) => {
         const { task, category } = group[0]
@@ -102,7 +105,10 @@ export function DailyTasks({ picks, tasks, categories, query, disabled, onFinali
         const steps = group.filter(({ step }) => step)
         return <ListItem key={taskId} disableGutters sx={{ display: 'block' }}>
           {wholeTask ? renderPick(wholeTask) : <Stack sx={{ px: 1.5, py: 1 }}>
-            <Typography sx={{ fontWeight: 600, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Typography>
+            <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
+              <Typography sx={{ fontWeight: 600, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Typography>
+              {!task.completed && group.some(({ step }) => !step?.completed) && <MoveDailyButton id={`task:${task.id}`} label={task.description} disabled={disabled} onMove={onMove} />}
+            </Stack>
             <Typography variant="caption" color="text.secondary">{category}</Typography>
             <DetailedDescriptionDisclosure text={task.detailed_description} label={task.description} />
           </Stack>}

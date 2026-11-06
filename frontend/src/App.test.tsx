@@ -91,6 +91,16 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = [], 
       }
     }
     if (resource === 'daily-tasks' || resource === 'tomorrow-tasks') {
+      if (rawId === 'move' && method === 'POST') {
+        const [kind, taskId, stepId] = input.id.split(':')
+        if (kind === 'reminder') reminders = reminders.map((item) => item.id === Number(taskId) ? { ...item, expires_at: null, available_today_until: null } : item)
+        else {
+          const moved = daily.filter((item) => item.task_id === Number(taskId) && (kind === 'task' || item.subtask_id === stepId))
+          daily = daily.filter((item) => !moved.includes(item))
+          if (input.date === 'tomorrow') tomorrow.push(...moved)
+        }
+        return Response.json({ date: input.date, timezone: input.timezone })
+      }
       if (rawId === 'finalize' && method === 'POST') return new Response(null, { status: 204 })
       let picks = (resource === 'daily-tasks' ? daily : tomorrow).filter((item) => item.expires_at > Date.now())
       if (method === 'POST') {
@@ -170,6 +180,54 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: `Actions for category ${category}` }))
     await user.click(await screen.findByRole('menuitem', { name: action }))
   }
+
+  it('moves one selected step to tomorrow and keeps failed date moves retryable', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [{ id: 'a', description: 'Design', completed: false }, { id: 'b', description: 'Ship', completed: false }] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    await user.click(screen.getByRole('button', { name: 'Move to another day: Design' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Tomorrow' }))
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Complete daily Design' })).not.toBeInTheDocument())
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Ship' })).toBeInTheDocument()
+    const first = fetchMock.mock.calls.find(([url]) => url === '/api/daily-tasks/move')!
+    expect(JSON.parse(String(first[1]?.body))).toEqual({ id: 'subtask:1:a', date: 'tomorrow', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    await user.click(screen.getByRole('button', { name: 'Move to another day: Build' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Select date' }))
+    const dialog = screen.getByRole('dialog')
+    const date = within(dialog).getByLabelText(/Target date/)
+    fireEvent.change(date, { target: { value: '2030-04-02' } })
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(within(dialog).getByRole('button', { name: 'Move' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(date).toHaveValue('2030-04-02')
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Ship', hidden: true })).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Move' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.queryByRole('checkbox', { name: 'Complete daily Ship' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Active' }))
+    expect(screen.getByRole('button', { name: 'View task Build' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' })).toBeInTheDocument()
+  })
+
+  it('offers reminder rescheduling using saved timezone and no move for scheduled work', async () => {
+    const fetchMock = mockApi([], [], [{ id: 3, description: 'Dentist', due_at: Date.now(), timezone: 'Europe/Berlin', completed: false, expires_at: Date.now() + 3_600_000, available_today_until: null }], [{ id: 7, description: 'Exercise', subtasks: [], weekdays: [1, 2, 3, 4, 5, 6, 7], timezone: 'UTC', available_today_until: null }])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await user.click(await screen.findByRole('tab', { name: 'Tasks of the day' }))
+    await user.click(await screen.findByRole('button', { name: 'Move to another day: Dentist' }))
+    expect(screen.queryByRole('button', { name: 'Move to another day: Exercise' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('menuitem', { name: 'Select date' }))
+    expect(within(screen.getByRole('dialog')).getByText(/keeping its local time/)).toHaveTextContent('Europe/Berlin')
+    fireEvent.change(screen.getByLabelText(/Target date/), { target: { value: '2030-04-02' } })
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Move' }))
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Complete daily Dentist' })).not.toBeInTheDocument())
+    const write = fetchMock.mock.calls.find(([url]) => url === '/api/daily-tasks/move')!
+    expect(JSON.parse(String(write[1]?.body))).toMatchObject({ id: 'reminder:3', date: '2030-04-02' })
+  })
 
   it('edits optional task and step details, retains failed drafts, and shows notes only after expansion', async () => {
     const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [{

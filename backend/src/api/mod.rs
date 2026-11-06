@@ -29,6 +29,7 @@ pub struct AppState {
 /// Services are constructed only after verification, with immutable user-scoped DAOs.
 #[derive(Clone)]
 pub(super) struct Workspace {
+    pub daily_work: crate::service::DailyWorkService,
     pub reminders: ReminderService,
     pub scheduled: ScheduledService,
     pub daily: DailyService,
@@ -105,6 +106,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/daily-tasks/finalize",
             axum::routing::post(daily::finalize),
+        )
+        .route(
+            "/daily-tasks/move",
+            axum::routing::post(daily::move_to_date),
         )
         .route(
             "/tasks/{id}/completion",

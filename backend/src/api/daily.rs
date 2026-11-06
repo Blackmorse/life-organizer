@@ -8,6 +8,32 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MoveInput {
+    id: String,
+    date: String,
+    timezone: Option<String>,
+}
+
+pub async fn move_to_date(
+    Extension(w): Extension<Workspace>,
+    Json(input): Json<MoveInput>,
+) -> Result<Json<crate::dao::daily_work::DailyMove>, ServiceError> {
+    let item = w
+        .daily_work
+        .list()
+        .await?
+        .into_iter()
+        .find(|item| item.id == input.id)
+        .ok_or(ServiceError::NotFound("current daily item"))?;
+    Ok(Json(
+        w.daily_work
+            .move_to_date(&item, &input.date, input.timezone.as_deref())
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Selection {
     task_id: i64,
     subtask_index: Option<usize>,

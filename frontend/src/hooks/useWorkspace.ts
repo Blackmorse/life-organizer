@@ -156,6 +156,20 @@ export function useWorkspace() {
 
   return {
     categories, tasks, dailyTasks, tomorrowTasks, scheduledTasks, scheduledDaily, reminders, loading, saving, error, authorizationRequired,
+    moveDailyTask: (id: string, date: string) => mutate(async () => {
+      const destination = await api.moveDailyTask(id, date)
+      const [kind, taskId, stepId] = id.split(':')
+      if (kind === 'reminder') setReminders((items) => items.map((item) => item.id === Number(taskId) ? { ...item, expires_at: null, available_today_until: null } : item))
+      else setDailyTasks((items) => items.filter((item) => item.task_id !== Number(taskId) || (kind === 'subtask' && item.subtask_id !== stepId)))
+      try {
+        const [future, nextReminders] = await Promise.all([api.listTomorrowTasks(), api.listReminders()])
+        setTomorrowTasks(future.filter((item) => item.expires_at > Date.now()))
+        setReminders(normalizeReminders(nextReminders))
+      } catch (cause) {
+        setError(`Move saved for ${destination.date} (${destination.timezone}), but workspace could not be refreshed. ${errorMessage(cause)} Use Refresh to reload.`)
+        setAuthorizationRequired(cause instanceof AuthorizationError)
+      }
+    }),
     saveReminder: (input: ReminderTaskInput, id?: number) => mutate(async () => {
       const [task] = normalizeReminders([await api.saveReminder(input, id)])
       setReminders((items) => id === undefined ? [...items, task] : items.map((item) => item.id === id ? task : item))

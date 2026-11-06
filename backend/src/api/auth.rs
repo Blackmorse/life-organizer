@@ -57,6 +57,9 @@ pub async fn authenticate(
         Err(error) => return ServiceError::from(error).into_response(),
     };
     request.extensions_mut().insert(Workspace {
+        daily_work: crate::service::DailyWorkService::new(Arc::new(
+            crate::dao::daily_work::PgDailyWorkDao::new(state.pool.clone(), user.id),
+        )),
         reminders: ReminderService::new(Arc::new(PgReminderDao::new(state.pool.clone(), user.id))),
         scheduled: ScheduledService::new(Arc::new(PgScheduledDao::new(
             state.pool.clone(),

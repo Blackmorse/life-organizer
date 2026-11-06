@@ -116,11 +116,17 @@ impl DailyDao for PgDailyDao {
         let instant = super::maintenance::now(&mut tx).await?;
         super::maintenance::expire_picks(&mut tx, table, Some(self.user_id), None, instant).await?;
         tx.commit().await?;
-        let rows: Vec<(i64, String, i64)> = sqlx::query_as(&format!("SELECT d.task_id, d.subtask_id, (extract(epoch FROM d.expires_at) * 1000)::bigint FROM {table} d JOIN tasks t ON t.id = d.task_id JOIN categories c ON c.id = t.category_id WHERE c.user_id = $1 AND d.expires_at > statement_timestamp() AND (d.subtask_id = '' OR EXISTS (SELECT 1 FROM jsonb_array_elements(t.subtasks) s WHERE s->>'id' = d.subtask_id)) ORDER BY d.task_id, d.subtask_id"))
+        let rows: Vec<(i64, String, i64, String)> = sqlx::query_as(&format!("SELECT d.task_id, d.subtask_id, (extract(epoch FROM d.expires_at) * 1000)::bigint, d.timezone FROM {table} d JOIN tasks t ON t.id = d.task_id JOIN categories c ON c.id = t.category_id WHERE c.user_id = $1 AND d.expires_at > statement_timestamp() AND (d.subtask_id = '' OR EXISTS (SELECT 1 FROM jsonb_array_elements(t.subtasks) s WHERE s->>'id' = d.subtask_id)) ORDER BY d.task_id, d.subtask_id"))
             .bind(self.user_id).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
-            .map(|(task_id, subtask_id, expires_at)| DailyTask {
+            .filter(|(_, _, expiry, timezone)| {
+                table != "tomorrow_tasks"
+                    || crate::planning::zone(timezone).is_ok_and(|zone| {
+                        crate::planning::tomorrow_reset(zone, instant).timestamp_millis() == *expiry
+                    })
+            })
+            .map(|(task_id, subtask_id, expires_at, _)| DailyTask {
                 task_id,
                 subtask_id,
                 expires_at,
