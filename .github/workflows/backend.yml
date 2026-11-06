@@ -1,4 +1,5 @@
 name: Publish backend image
+# Backend image rebuild trigger.
 
 on:
   push:
