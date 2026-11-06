@@ -1,16 +1,9 @@
 import { useState } from 'react'
 import { Alert, Button, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle, IconButton, Menu, MenuItem, TextField, Tooltip } from '@mui/material'
 import EventRepeatIcon from '@mui/icons-material/EventRepeat'
+import { nextDate } from '../planning'
 
 export type MoveDaily = (id: string, date: string) => Promise<boolean>
-
-function nextDate(timezone: string) {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date())
-  const value = (type: string) => parts.find((part) => part.type === type)!.value
-  const day = new Date(`${value('year')}-${value('month')}-${value('day')}T12:00:00Z`)
-  day.setUTCDate(day.getUTCDate() + 1)
-  return day.toISOString().slice(0, 10)
-}
 
 export function MoveDailyButton({ id, label, disabled, onMove, timezone = Intl.DateTimeFormat().resolvedOptions().timeZone, reminder = false }: {
   id: string, label: string, disabled: boolean, onMove: MoveDaily, timezone?: string, reminder?: boolean

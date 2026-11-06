@@ -39,16 +39,21 @@ standalone browser.
   ordinary daily-list rows use Show/Hide details disclosures. Collapsed rows and
   Telegram messages show only existing short descriptions. Notes survive refresh,
   edits, reordering, completion, and restoration; failed writes retain drafts.
-- Separate calendar **+1** buttons beside active ordinary tasks/subtasks toggle
-  tomorrow planning independently of today's calendar. Parent selection adds all
-  current steps, or the whole task when no steps exist. Highlighted buttons allow
-  removal and persist across Refresh. Selection saves device IANA timezone;
-  tomorrow means next calendar date, even before 02:00. At that date's 02:00 the
+- One calendar button beside active ordinary tasks/subtasks opens a three-option
+  menu: **Add for today**, **Add for tomorrow**, or **Select date**. Selected today
+  and tomorrow options become removal actions. A native date field in a MUI dialog
+  accepts future calendar dates through year 9998 and retains failed-write drafts.
+  Parent selection adds all current steps, or the whole task when no steps exist.
+  Future planning stays independent of today's picks and preserves progress;
+  replanning replaces the existing future date for each selected pick. Selection
+  saves device IANA timezone; tomorrow means next calendar date, even before 02:00.
+  At the chosen date's 02:00 the
   UI clears future highlights and the backend preserves picks for its 08:00 Yes/No
   morning offer, alongside carryover/scheduled/reminder work. Yes adds unfinished
   eligible work to today's list; No dismisses. Future picks never join today's
   checklist or summary directly. Stable IDs preserve edits/reordering. Failed
-  writes retain selection, and loading/saving disables both calendar controls.
+  writes retain selection, and loading/saving disables planning controls. Later-date
+  plans persist server-side; the calendar highlight reflects today/tomorrow picks.
 - Reminder tasks tab manages category-free one-time work with description and
   required exact date/time, without urgency or subtasks. New dates are entered in
   device timezone and saved as Unix milliseconds plus IANA timezone. Existing
@@ -81,7 +86,7 @@ standalone browser.
   completion checkboxes and remove buttons. Calendar buttons beside active task
   rows and subtask rows toggle selection. Adding a task with subtasks selects all
   its current steps instead of the parent, preserving completed flags. Its parent
-  calendar is selected when all steps are picked; clicking it removes all picks
+  Today menu option is selected when all steps are picked; choosing removal removes all picks
   for that task. Partial selections can be filled by adding the parent again.
   Tasks without subtasks remain whole-task picks. Selected subtasks are grouped by task ID
   beneath a single bold parent task name in an indented nested list. Context-only
@@ -166,6 +171,7 @@ standalone browser.
 | `src/components/Subtasks.tsx` | Numbered checklist, progress, direct add, and per-row inline edit/delete/reorder actions. |
 | `src/components/DailyTasks.tsx`, `DailyContext.ts` | Daily checklist, calendar pick controls, and shared selection actions. |
 | `src/components/MoveDailyButton.tsx` | Shared move menu and future-date dialog for daily ordinary work and reminders. |
+| `src/components/DailyPickButton.tsx`, `src/planning.ts` | Unified ordinary planning menu/date dialog and shared calendar-date helper. |
 | `src/components/ScheduledTasks.tsx`, `ScheduledDaily.tsx` | Recurring-template forms/list and independent daily-occurrence progress. |
 | `src/components/ReminderTasks.tsx`, `src/reminders.ts` | One-time reminder forms/list, daily rows, saved-zone date formatting and expiry normalization. |
 | `src/telegram.ts` | Optional, isolated Telegram SDK bridge. |
@@ -287,8 +293,11 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
   its stable ID, so the hook reloads tasks before publishing picks. Expiry is
   server-enforced; changing device timezone does not alter existing picks' expiry.
 - `/tomorrow-tasks` GET/POST/DELETE uses the same bodies and response shape as
-  daily selection, with independent state in the hook/context. `expires_at` is
-  tomorrow's local 02:00 handoff to morning storage, not an accepted daily expiry.
+  daily selection, with independent state in the hook/context. POST also accepts
+  optional `date: "tomorrow" | "YYYY-MM-DD"` (default tomorrow), validated against
+  the supplied timezone's calendar date. `expires_at` is the chosen date's local
+  02:00 handoff to morning storage, not an accepted daily expiry. Responses list
+  next-calendar-day plans only, even when saving a later date.
   Adding steps reloads tasks before publishing picks to obtain stable IDs. Initial
   load/Refresh fetch future picks; timer and focus/visibility checks clear expired
   highlights. No frontend request is required to generate/send the morning offer.

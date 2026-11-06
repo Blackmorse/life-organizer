@@ -287,6 +287,159 @@ async fn detailed_descriptions_round_trip_default_clear_and_follow_task_guards()
 }
 
 #[tokio::test]
+async fn chosen_date_plans_preserve_today_and_progress_and_handoff_at_target_morning() {
+    use backend::{dao::maintenance, planning};
+    use chrono::Duration;
+    let db = TestDb::new().await;
+    let category = db.category_service().create("Work").await.unwrap();
+    let task = db
+        .task_service()
+        .create(category.id, "Release", TaskUrgency::Soon)
+        .await
+        .unwrap();
+    let mut done = Subtask::new("Built");
+    done.completed = true;
+    db.task_service()
+        .replace_subtasks(task.id, &[done, Subtask::new("Ship")])
+        .await
+        .unwrap();
+    let app = db.app();
+    let zone = planning::zone("Europe/Berlin").unwrap();
+    let day = (support::clock(&db).await.with_timezone(&zone) + Duration::days(14)).date_naive();
+    let input = json!({"task_id":task.id,"timezone":"Europe/Berlin","date":day.to_string(),"subtask_index":1});
+    for date in [
+        "2000-01-01",
+        "2027-02-30",
+        "2027-1-01",
+        "10000-01-01",
+        "today",
+        "",
+    ] {
+        let mut invalid = input.clone();
+        invalid["date"] = json!(date);
+        assert_eq!(
+            request(&app, "POST", "/tomorrow-tasks", Some(invalid))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        request_as(
+            &app,
+            support::TELEGRAM_ID + 1,
+            "POST",
+            "/tomorrow-tasks",
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, today) = request(
+        &app,
+        "POST",
+        "/daily-tasks",
+        Some(json!({"task_id":task.id,"timezone":"UTC"})),
+    )
+    .await;
+    let original = db.task_service().get(task.id).await.unwrap();
+    for _ in 0..2 {
+        let (status, tomorrow) =
+            request(&app, "POST", "/tomorrow-tasks", Some(input.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(tomorrow, json!([])); // Later dates never masquerade as tomorrow.
+    }
+    let plans: Vec<(String, chrono::DateTime<chrono::Utc>, String)> = sqlx::query_as(
+        "SELECT subtask_id,expires_at,timezone FROM tomorrow_tasks WHERE task_id=$1",
+    )
+    .bind(task.id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let reset = planning::at(zone, day, 2);
+    assert_eq!(
+        plans,
+        vec![(
+            original.subtasks[1].id.clone().unwrap(),
+            reset,
+            "Europe/Berlin".into()
+        )]
+    );
+    assert_eq!(request(&app, "GET", "/daily-tasks", None).await.1, today);
+    assert_eq!(db.task_service().get(task.id).await.unwrap(), original);
+
+    // Parent selection plans all current steps without changing completion or IDs.
+    let mut parent = input.clone();
+    parent.as_object_mut().unwrap().remove("subtask_index");
+    assert_eq!(
+        request(&app, "POST", "/tomorrow-tasks", Some(parent))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tomorrow_tasks")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(db.task_service().get(task.id).await.unwrap(), original);
+    let mut tx = db.pool.begin().await.unwrap();
+    maintenance::expire_picks(
+        &mut tx,
+        "tomorrow_tasks",
+        Some(db.user.id),
+        None,
+        reset - Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_items")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let mut tx = db.pool.begin().await.unwrap();
+    maintenance::expire_picks(&mut tx, "tomorrow_tasks", Some(db.user.id), None, reset)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (due, until, step): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, String) = sqlx::query_as("SELECT m.due_at,m.valid_until,i.subtask_id FROM morning_offers m JOIN morning_offer_items i ON i.offer_id=m.id WHERE m.reset_at=$1")
+        .bind(reset).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(due, planning::at(zone, day, 8));
+    assert_eq!(until, planning::at(zone, day.succ_opt().unwrap(), 2));
+    assert_eq!(Some(step), original.subtasks[1].id);
+
+    // Replanning invalidates old offer buttons, without removing today's picks.
+    let next_day = day.succ_opt().unwrap();
+    let mut replacement = input.clone();
+    replacement["date"] = json!(next_day.to_string());
+    assert_eq!(
+        request(&app, "POST", "/tomorrow-tasks", Some(replacement))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offer_items")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(request(&app, "GET", "/daily-tasks", None).await.1, today);
+    db.task_service()
+        .set_completed(task.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, "POST", "/tomorrow-tasks", Some(input))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
 async fn tomorrow_selection_is_independent_persistent_scoped_and_validated() {
     let db = TestDb::new().await;
     let category = db.category_service().create("Work").await.unwrap();

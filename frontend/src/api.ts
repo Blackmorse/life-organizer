@@ -64,7 +64,8 @@ export const api = {
   }),
   removeDailyTask: (task_id: number, subtask_id: string) => request<DailyTask[]>('/daily-tasks', 'DELETE', { task_id, subtask_id }),
   listTomorrowTasks: (signal?: AbortSignal) => request<DailyTask[]>('/tomorrow-tasks', 'GET', undefined, signal),
-  selectTomorrowTask: (task_id: number, subtask_index?: number) => request<DailyTask[]>('/tomorrow-tasks', 'POST', {
+  selectTomorrowTask: (task_id: number, subtask_index?: number, date?: string) => request<DailyTask[]>('/tomorrow-tasks', 'POST', {
+    date,
     task_id, subtask_index, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   }),
   removeTomorrowTask: (task_id: number, subtask_id: string) => request<DailyTask[]>('/tomorrow-tasks', 'DELETE', { task_id, subtask_id }),

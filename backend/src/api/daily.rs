@@ -87,13 +87,27 @@ pub async fn list_tomorrow(
 
 pub async fn select_tomorrow(
     Extension(w): Extension<Workspace>,
-    Json(input): Json<Selection>,
+    Json(input): Json<FutureSelection>,
 ) -> Result<Json<Vec<DailyTask>>, ServiceError> {
     Ok(Json(
         w.tomorrow
-            .select(input.task_id, input.subtask_index, &input.timezone)
+            .select_date(
+                input.task_id,
+                input.subtask_index,
+                &input.timezone,
+                input.date.as_deref().unwrap_or("tomorrow"),
+            )
             .await?,
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FutureSelection {
+    task_id: i64,
+    subtask_index: Option<usize>,
+    timezone: String,
+    date: Option<String>,
 }
 
 pub async fn remove_tomorrow(

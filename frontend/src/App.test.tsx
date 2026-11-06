@@ -5,12 +5,24 @@ import App from './App'
 import { AppTheme } from './theme'
 import type { Category, DailyTask, Subtask, Task, ScheduledTask, ScheduledOccurrence, ReminderTask } from './types'
 
+async function plan(user: ReturnType<typeof userEvent.setup>, label: string, action = 'Add for today') {
+  if (!screen.queryByRole('menu')) await user.click(await screen.findByRole('button', { name: `Plan task: ${label}` }))
+  await user.click(screen.getByRole('menuitem', { name: action }))
+}
+
+async function expectPlan(user: ReturnType<typeof userEvent.setup>, label: string, action: string) {
+  if (!screen.queryByRole('menu')) await user.click(screen.getByRole('button', { name: `Plan task: ${label}` }))
+  expect(screen.getByRole('menuitem', { name: action })).toBeInTheDocument()
+  await user.keyboard('{Escape}')
+}
+
 // Component-level tests run the real client and hook against a fake HTTP boundary.
 function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = [], initialReminders: ReminderTask[] = [], initialScheduled: ScheduledTask[] = [], autoAcceptScheduled = true) {
   let categories = [...initialCategories]
   let tasks = [...initialTasks]
   let daily: DailyTask[] = []
   let tomorrow: DailyTask[] = []
+  let later: DailyTask[] = []
   let scheduled: ScheduledTask[] = [...initialScheduled]
   let occurrences: ScheduledOccurrence[] = []
   let reminders: ReminderTask[] = [...initialReminders]
@@ -102,7 +114,8 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = [], 
         return Response.json({ date: input.date, timezone: input.timezone })
       }
       if (rawId === 'finalize' && method === 'POST') return new Response(null, { status: 204 })
-      let picks = (resource === 'daily-tasks' ? daily : tomorrow).filter((item) => item.expires_at > Date.now())
+      const customDate = resource === 'tomorrow-tasks' && Boolean(input?.date)
+      let picks = (resource === 'daily-tasks' ? daily : customDate ? later : tomorrow).filter((item) => item.expires_at > Date.now())
       if (method === 'POST') {
         const task = tasks.find((item) => item.id === input.task_id)!
         const steps = input.subtask_index === undefined ? task.subtasks : [task.subtasks[input.subtask_index]]
@@ -117,8 +130,9 @@ function mockApi(initialCategories: Category[] = [], initialTasks: Task[] = [], 
       }
       if (method === 'DELETE') picks = picks.filter((item) => item.task_id !== input.task_id || (input.subtask_id !== '' && item.subtask_id !== input.subtask_id))
       if (resource === 'daily-tasks') daily = picks
+      else if (customDate) later = picks
       else tomorrow = picks
-      return Response.json(picks)
+      return Response.json(customDate ? tomorrow : picks)
     }
     if (resource === 'categories') {
       if (method === 'GET') return Response.json(categories)
@@ -187,7 +201,7 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     await user.click(screen.getByRole('button', { name: 'Move to another day: Design' }))
     await user.click(screen.getByRole('menuitem', { name: 'Tomorrow' }))
@@ -210,7 +224,7 @@ describe('workspace', () => {
     expect(screen.queryByRole('checkbox', { name: 'Complete daily Ship' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'Active' }))
     expect(screen.getByRole('button', { name: 'View task Build' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Plan task: Build' })).toBeInTheDocument()
   })
 
   it('offers reminder rescheduling using saved timezone and no move for scheduled work', async () => {
@@ -268,7 +282,7 @@ describe('workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
     expect(screen.getByText('Revised step notes')).toBeVisible()
-    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     expect(screen.queryByText('Revised step notes')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'View details for Design' }))
@@ -293,30 +307,30 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tomorrow: Read' }))
-    expect(screen.getByRole('button', { name: 'Remove from Tomorrow: Read' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('button', { name: 'Add to Tasks of the day: Read' })).toHaveAttribute('aria-pressed', 'false')
+    await plan(user, 'Read', 'Add for tomorrow')
+    await expectPlan(user, 'Read', 'Remove from tomorrow')
+    await expectPlan(user, 'Read', 'Add for today')
     await user.click(screen.getByRole('button', { name: 'View task Build' }))
-    await user.click(screen.getByRole('button', { name: 'Add to Tomorrow: Design' }))
-    expect(screen.getByRole('button', { name: 'Add to Tomorrow: Build' })).toHaveAttribute('aria-pressed', 'false')
-    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Design' }))
-    await user.click(screen.getByRole('button', { name: 'Add to Tomorrow: Build' }))
-    expect(screen.getByRole('button', { name: 'Remove from Tomorrow: Build' })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('button', { name: 'Remove from Tomorrow: Ship' })).toHaveAttribute('aria-pressed', 'true')
+    await plan(user, 'Design', 'Add for tomorrow')
+    await expectPlan(user, 'Build', 'Add for tomorrow')
+    await plan(user, 'Design')
+    await plan(user, 'Build', 'Add for tomorrow')
+    await expectPlan(user, 'Build', 'Remove from tomorrow')
+    await expectPlan(user, 'Ship', 'Remove from tomorrow')
     const selection = fetchMock.mock.calls.find(([url, options]) => url === '/api/tomorrow-tasks' && options?.method === 'POST')!
     expect(JSON.parse(String(selection[1]?.body))).toEqual({ task_id: 2, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
-    expect(screen.getByRole('button', { name: 'Remove from Tomorrow: Build' })).toHaveAttribute('aria-pressed', 'true')
+    await expectPlan(user, 'Build', 'Remove from tomorrow')
     const disclosure = screen.getByRole('button', { name: 'View task Build' })
     if (disclosure.getAttribute('aria-expanded') === 'false') await user.click(disclosure)
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
-    await user.click(screen.getByRole('button', { name: 'Remove from Tomorrow: Ship' }))
+    await plan(user, 'Ship', 'Remove from tomorrow')
     expect(await screen.findByRole('alert')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Remove from Tomorrow: Ship' })).toHaveAttribute('aria-pressed', 'true')
-    await user.click(screen.getByRole('button', { name: 'Remove from Tomorrow: Build' }))
-    expect(screen.getByRole('button', { name: 'Add to Tomorrow: Design' })).toHaveAttribute('aria-pressed', 'false')
-    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Design' })).toHaveAttribute('aria-pressed', 'true')
+    await expectPlan(user, 'Ship', 'Remove from tomorrow')
+    await plan(user, 'Build', 'Remove from tomorrow')
+    await expectPlan(user, 'Design', 'Add for tomorrow')
+    await expectPlan(user, 'Design', 'Remove from today')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     expect(screen.getByRole('checkbox', { name: 'Complete daily Design' })).toBeInTheDocument()
     expect(screen.queryByRole('checkbox', { name: 'Complete daily Read' })).not.toBeInTheDocument()
@@ -324,8 +338,51 @@ describe('workspace', () => {
     await user.click(screen.getByRole('tab', { name: 'Active' }))
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 86_400_001)
     fireEvent.focus(window)
-    expect(screen.getByRole('button', { name: 'Add to Tomorrow: Read' })).toHaveAttribute('aria-pressed', 'false')
+    await expectPlan(user, 'Read', 'Add for tomorrow')
     clock.mockRestore()
+  })
+
+  it('plans tasks and subtasks for a selected date with retryable drafts and no duplicate writes', async () => {
+    const fetchMock = mockApi([{ id: 1, user_id: 1, description: 'Work' }], [
+      { id: 1, category_id: 1, description: 'Build', urgency: 'soon', completed: false, subtasks: [{ description: 'Ship', completed: false }] },
+    ])
+    const user = userEvent.setup()
+    renderWorkspace()
+    await plan(user, 'Build')
+    await user.click(screen.getByRole('button', { name: 'View task Build' }))
+    expect(screen.getAllByRole('button', { name: 'Plan task: Build' })).toHaveLength(1)
+    await plan(user, 'Ship', 'Select date')
+    let dialog = screen.getByRole('dialog')
+    const date = within(dialog).getByLabelText(/Target date/)
+    fireEvent.change(date, { target: { value: '2000-01-01' } })
+    expect(within(dialog).getByRole('button', { name: 'Add' })).toBeDisabled()
+    const target = new Date()
+    target.setDate(target.getDate() + 14)
+    const chosen = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`
+    fireEvent.change(date, { target: { value: chosen } })
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Your selected date is kept')
+    expect(date).toHaveValue(chosen)
+    let finish!: (response: Response) => void
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve }))
+    await user.dblClick(within(dialog).getByRole('button', { name: 'Add' }))
+    expect(within(dialog).getByRole('button', { name: 'Add' })).toBeDisabled()
+    const writes = fetchMock.mock.calls.filter(([url, options]) => url === '/api/tomorrow-tasks' && options?.method === 'POST')
+    expect(writes).toHaveLength(2)
+    expect(JSON.parse(String(writes[1][1]?.body))).toEqual({ task_id: 1, subtask_index: 0, date: chosen, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    await act(async () => { finish(Response.json([])) })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await expectPlan(user, 'Ship', 'Remove from today')
+    await plan(user, 'Build', 'Select date')
+    dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText(/Target date/), { target: { value: chosen } })
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+    const last = fetchMock.mock.calls.filter(([url, options]) => url === '/api/tomorrow-tasks' && options?.method === 'POST').at(-1)!
+    expect(JSON.parse(String(last[1]?.body))).toEqual({ task_id: 1, date: chosen, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
+    expect(screen.getByRole('checkbox', { name: 'Complete daily Ship' })).toBeInTheDocument()
   })
 
   it('creates exact-time reminders without urgency and retains failed edit drafts', async () => {
@@ -539,7 +596,7 @@ describe('workspace', () => {
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     expect(screen.getByRole('button', { name: 'Finalize tasks' })).toBeDisabled()
     await user.click(screen.getByRole('tab', { name: 'Active' }))
-    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     await user.type(screen.getByRole('searchbox'), 'no match')
     const button = screen.getByRole('button', { name: 'Finalize tasks' })
@@ -589,7 +646,7 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     for (const [status, error] of [
       [400, "Open the bot's private chat and send /start."],
@@ -614,9 +671,9 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('button', { name: 'View task Build' }))
-    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Ship' })).toHaveAttribute('aria-pressed', 'true')
+    await expectPlan(user, 'Ship', 'Remove from today')
     await user.click(screen.getByRole('button', { name: 'Move subtask 2 up' }))
     await user.click(screen.getByRole('button', { name: 'Edit subtask 1' }))
     await user.clear(screen.getByRole('textbox', { name: 'Subtask description' }))
@@ -661,7 +718,7 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     const checkbox = screen.getByRole('checkbox', { name: 'Complete daily Build' })
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
@@ -697,7 +754,7 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('button', { name: 'View task Build' }))
     await user.click(screen.getByRole('checkbox', { name: 'Subtask 1: Ship' }))
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/daily-tasks/finalize')).toHaveLength(1)
@@ -715,9 +772,9 @@ describe('workspace', () => {
     const user = userEvent.setup()
     renderWorkspace()
     await user.click(await screen.findByRole('button', { name: 'View task Build' }))
-    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Ship' }))
-    await user.click(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' }))
-    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' })).toHaveAttribute('aria-pressed', 'true')
+    await plan(user, 'Ship')
+    await plan(user, 'Build')
+    await expectPlan(user, 'Build', 'Remove from today')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     expect(screen.queryByRole('checkbox', { name: 'Complete daily Build' })).not.toBeInTheDocument()
     expect(screen.getAllByRole('checkbox')).toHaveLength(2)
@@ -725,11 +782,11 @@ describe('workspace', () => {
     expect(screen.getByRole('checkbox', { name: 'Complete daily Ship' })).not.toBeChecked()
     await user.click(screen.getByRole('tab', { name: 'Active' }))
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
-    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
+    await plan(user, 'Build', 'Remove from today')
     expect(await screen.findByRole('alert')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' })).toHaveAttribute('aria-pressed', 'true')
-    await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))
-    expect(screen.getByRole('button', { name: 'Add to Tasks of the day: Build' })).toHaveAttribute('aria-pressed', 'false')
+    await expectPlan(user, 'Build', 'Remove from today')
+    await plan(user, 'Build', 'Remove from today')
+    await expectPlan(user, 'Build', 'Add for today')
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'View task Build' }))
@@ -744,7 +801,7 @@ describe('workspace', () => {
     ])
     const user = userEvent.setup()
     renderWorkspace()
-    await user.click(await screen.findByRole('button', { name: 'Add to Tasks of the day: Build' }))
+    await plan(user, 'Build')
     await user.click(screen.getByRole('tab', { name: 'Tasks of the day' }))
     fetchMock.mockResolvedValueOnce(Response.json({ error: 'storage operation failed' }, { status: 500 }))
     await user.click(screen.getByRole('button', { name: 'Remove from Tasks of the day: Build' }))

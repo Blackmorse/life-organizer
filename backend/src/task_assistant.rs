@@ -704,6 +704,15 @@ mod tests {
         async fn select(&self, _: i64, _: Option<usize>, _: &str) -> Result<bool, DaoError> {
             unreachable!()
         }
+        async fn select_date(
+            &self,
+            _: i64,
+            _: Option<usize>,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, DaoError> {
+            unreachable!()
+        }
         async fn remove(&self, _: i64, _: &str) -> Result<(), DaoError> {
             unreachable!()
         }

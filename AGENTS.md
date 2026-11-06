@@ -243,8 +243,11 @@ reminders until their handoff. Reminder moves reschedule the actual reminder dat
 preserving saved local time/timezone and clearing daily selection. Scheduled work
 cannot move. Text/voice requests share the same guarded move application logic;
 the assistant must list today's work before moving an exact returned ID.
-Separate calendar **+1** buttons plan ordinary tasks/subtasks for tomorrow without
-changing today's picks. Parent selection uses all current steps, as for today.
+One calendar button beside ordinary tasks/subtasks opens **Add for today**,
+**Add for tomorrow**, or **Select date**. Today/tomorrow options become removal
+actions when selected. Future planning leaves today's picks and progress intact;
+choosing a date replaces that pick's previous future plan and uses the same 08:00
+suggestion flow as daily moves. Parent selection uses all current steps, as for today.
 Tomorrow means the next calendar date in the device IANA timezone captured on add,
 even before 02:00. Migration `0014_tomorrow_tasks.sql` stores independent picks;
 at the target date's 02:00 they move into durable morning-offer storage. At 08:00

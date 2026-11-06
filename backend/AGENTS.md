@@ -172,7 +172,7 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | DELETE | `/scheduled-tasks/daily/{id}` | Skip occurrence for today only; return current occurrences (`200`). |
 | GET | `/daily-tasks` | Current user's unexpired daily picks (`200`). |
 | GET | `/tomorrow-tasks` | Current user's future tomorrow picks (`200`). |
-| POST | `/tomorrow-tasks` | Plan a task/all current steps or one subtask for tomorrow (`200`). |
+| POST | `/tomorrow-tasks` | Plan a task/all current steps or one subtask for tomorrow or a chosen future date (`200`). |
 | DELETE | `/tomorrow-tasks` | Remove one future step or all future picks for a task (`200`). |
 | POST | `/daily-tasks` | Select all task subtasks (or the task if none), or one subtask; return current picks (`200`). |
 | DELETE | `/daily-tasks` | Remove one step or all picks for a task; return current picks (`200`). |
@@ -564,7 +564,13 @@ Migration `0014_tomorrow_tasks.sql` adds `tomorrow_tasks`, independent of
 `daily_tasks`, with the same task-owned stable step identities. The tomorrow routes
 reuse daily selection validation, ownership, archive rejection, bulk selection,
 and removal through `DailyService` and `PgDailyDao::tomorrow`. POST/DELETE bodies
-match daily bodies; responses are `{task_id, subtask_id, expires_at}[]`. Here
+match daily bodies, with optional POST `date` (`tomorrow` or `YYYY-MM-DD`, default
+tomorrow). Explicit dates must be strictly after the saved timezone's current
+calendar date, through year 9998, using the same validator as daily moves.
+Selection changes no current daily picks or original progress, replaces each
+pick's existing future plan, and removes earlier morning-offer links so old
+buttons cannot restore replanned work early. Responses list only next-calendar-day
+plans as `{task_id, subtask_id, expires_at}[]`, even after a later-date save. Here
 `expires_at` is the target calendar date's 02:00 handoff instant in Unix
 milliseconds, not the end of an accepted daily pick. `planning::tomorrow_reset` uses the
 next local calendar date even when selection happens before 02:00, including DST.

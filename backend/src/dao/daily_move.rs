@@ -8,7 +8,7 @@ use crate::{domain::Subtask, planning};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use sqlx::types::Json;
 
-fn target(
+pub(super) fn target(
     date: &str,
     timezone: &str,
     now: DateTime<Utc>,

@@ -5,8 +5,11 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
 ## Features
 
 - Browse an expandable category/task hierarchy, with per-category counts.
-- Use the calendar **+1** button beside an active task or subtask to plan it for
-  **tomorrow**. Click its highlighted button again to remove it. A parent with
+- Use one calendar button beside an active task or subtask to open **Add for today**,
+  **Add for tomorrow**, or **Select date**. Today and tomorrow options become removal
+  actions when already selected. Select date opens a future-date picker; the bot
+  offers unfinished work at **8:00 AM on that date** in your saved device timezone.
+  Choosing a new future date replaces that item's previous future plan. A parent with
   subtasks selects all its current steps; today and tomorrow selections are
   independent and survive reloads. Tomorrow means the next calendar date in your
   saved device timezone, including when planning before 2:00 AM. At tomorrow's
@@ -59,10 +62,10 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   Restart the backend to apply migration `0011_scheduled_morning_offers.sql`
   automatically. Existing daily occurrences and progress stay visible; new days
   require accepting the offer. Reopen or **Refresh** to load accepted work.
-- Use calendar buttons beside active tasks or subtasks to add/remove daily picks.
+- Use the calendar menu beside active tasks or subtasks to add/remove daily picks.
   Adding a task with subtasks selects **all its current subtasks** instead of the
-  parent, preserving completed flags. The parent calendar fills a partial selection
-  or removes all steps when fully selected. Tasks without subtasks are picked whole.
+  parent, preserving completed flags. The parent's Today option fills a partial
+  selection or removes all steps when fully selected. Tasks without subtasks are picked whole.
   **Tasks of the day** shows a checklist linked to the original work. Selected
   subtasks appear indented beneath their bold parent task name, grouped
   together per task. Whole-task picks keep their own checkbox and remove button.

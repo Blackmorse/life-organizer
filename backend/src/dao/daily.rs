@@ -25,6 +25,13 @@ pub trait DailyDao: Send + Sync {
         timezone: &str,
     ) -> Result<bool, DaoError>;
     async fn remove(&self, task_id: i64, subtask_id: &str) -> Result<(), DaoError>;
+    async fn select_date(
+        &self,
+        task_id: i64,
+        index: Option<usize>,
+        timezone: &str,
+        date: &str,
+    ) -> Result<bool, DaoError>;
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError>;
 }
 
@@ -140,6 +147,46 @@ impl DailyDao for PgDailyDao {
         index: Option<usize>,
         timezone: &str,
     ) -> Result<bool, DaoError> {
+        self.select_on(task_id, index, timezone, None).await
+    }
+
+    async fn select_date(
+        &self,
+        task_id: i64,
+        index: Option<usize>,
+        timezone: &str,
+        date: &str,
+    ) -> Result<bool, DaoError> {
+        self.select_on(task_id, index, timezone, Some(date)).await
+    }
+
+    async fn remove(&self, task_id: i64, subtask_id: &str) -> Result<(), DaoError> {
+        let table = self.table;
+        let mut tx = self.pool.begin().await?;
+        let instant = super::maintenance::now(&mut tx).await?;
+        super::maintenance::expire_picks(
+            &mut tx,
+            table,
+            Some(self.user_id),
+            Some(task_id),
+            instant,
+        )
+        .await?;
+        sqlx::query(&format!("DELETE FROM {table} d USING tasks t, categories c WHERE d.task_id = $1 AND ($2 = '' OR d.subtask_id = $2) AND t.id = d.task_id AND c.id = t.category_id AND c.user_id = $3"))
+            .bind(task_id).bind(subtask_id).bind(self.user_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+impl PgDailyDao {
+    async fn select_on(
+        &self,
+        task_id: i64,
+        index: Option<usize>,
+        timezone: &str,
+        date: Option<&str>,
+    ) -> Result<bool, DaoError> {
         // Table names are fixed constructor values, never user input.
         let table = self.table;
         let mut tx = self.pool.begin().await?;
@@ -165,7 +212,9 @@ impl DailyDao for PgDailyDao {
         .await?;
         let zone = super::maintenance::timezone(timezone)?;
         let reset = if table == "tomorrow_tasks" {
-            crate::planning::tomorrow_reset(zone, instant)
+            let (day, zone) =
+                super::daily_move::target(date.unwrap_or("tomorrow"), timezone, instant)?;
+            crate::planning::at(zone, day, 2)
         } else {
             crate::planning::daily_reset(zone, instant)
         };
@@ -202,27 +251,18 @@ impl DailyDao for PgDailyDao {
             .await?;
         }
         // Calendar-day arithmetic preserves local 02:00 across DST transitions.
+        if table == "tomorrow_tasks" {
+            for subtask_id in &subtask_ids {
+                sqlx::query("DELETE FROM morning_offer_items WHERE task_id=$1 AND subtask_id=$2")
+                    .bind(task_id)
+                    .bind(subtask_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         sqlx::query(&format!("INSERT INTO {table}(task_id, subtask_id, expires_at, timezone) SELECT $1, id, $4, $3 FROM unnest($2::text[]) AS ids(id) ON CONFLICT (task_id, subtask_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, timezone = EXCLUDED.timezone"))
             .bind(task_id).bind(&subtask_ids).bind(timezone).bind(reset).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(true)
-    }
-
-    async fn remove(&self, task_id: i64, subtask_id: &str) -> Result<(), DaoError> {
-        let table = self.table;
-        let mut tx = self.pool.begin().await?;
-        let instant = super::maintenance::now(&mut tx).await?;
-        super::maintenance::expire_picks(
-            &mut tx,
-            table,
-            Some(self.user_id),
-            Some(task_id),
-            instant,
-        )
-        .await?;
-        sqlx::query(&format!("DELETE FROM {table} d USING tasks t, categories c WHERE d.task_id = $1 AND ($2 = '' OR d.subtask_id = $2) AND t.id = d.task_id AND c.id = t.category_id AND c.user_id = $3"))
-            .bind(task_id).bind(subtask_id).bind(self.user_id).execute(&mut *tx).await?;
-        tx.commit().await?;
-        Ok(())
     }
 }

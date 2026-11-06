@@ -226,11 +226,16 @@ export function useWorkspace() {
     removeDailyTask: (id: number, stepId: string) => mutate(async () => {
       setDailyTasks(await api.removeDailyTask(id, stepId))
     }),
-    selectTomorrowTask: (id: number, index?: number) => mutate(async () => {
-      const picks = await api.selectTomorrowTask(id, index)
-      const nextTasks = await api.listTasks()
-      setTasks(nextTasks)
-      setTomorrowTasks(picks.filter((item) => item.expires_at > Date.now()))
+    selectTomorrowTask: (id: number, index?: number, date?: string) => mutate(async () => {
+      const picks = await api.selectTomorrowTask(id, index, date)
+      try {
+        const nextTasks = await api.listTasks()
+        setTasks(nextTasks)
+        setTomorrowTasks(picks.filter((item) => item.expires_at > Date.now()))
+      } catch (cause) {
+        setError(`Plan saved for ${date ?? 'tomorrow'}, but workspace could not be refreshed. ${errorMessage(cause)} Use Refresh to reload.`)
+        setAuthorizationRequired(cause instanceof AuthorizationError)
+      }
     }),
     removeTomorrowTask: (id: number, stepId: string) => mutate(async () => {
       setTomorrowTasks(await api.removeTomorrowTask(id, stepId))
