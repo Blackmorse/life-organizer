@@ -369,7 +369,7 @@ redirects and no automatic retries. Polling processes voice messages sequentiall
 Audio, transcripts, provider response bodies, and credentials are not logged.
 
 For typed text or after transcription, `VoiceAssistant` resolves the user from the Telegram sender
-and starts an independent `langchain-rust` conversation using OpenAI `gpt-4o-mini`
+and starts an independent `langchain-rust` conversation using OpenAI `gpt-4.1-mini`
 and the same `OPENAI_KEY`. The model receives eight native function tools:
 
 - `list_tasks_of_the_day({})` returns all current daily work with task name,
@@ -760,7 +760,7 @@ cargo clippy --all-targets -- -D warnings
 
 `TELEGRAM_BOT_TOKEN` is required and must belong to the bot launching this Mini App.
 `OPENAI_KEY` is required and nonblank; it authorizes voice transcription and
-`gpt-4o-mini` daily-task tool calling with OpenAI.
+`gpt-4.1-mini` daily-task tool calling with OpenAI.
 Keep both credentials backend-only; never use `VITE_*` variables for them.
 `DATABASE_URL` is required for application startup and must point to an existing
 PostgreSQL database; the database user needs schema migration permissions.

@@ -104,7 +104,7 @@ impl TaskAssistant {
         Self {
             pool,
             model: Arc::new(
-                OpenAI::new(OpenAIConfig::default().with_api_key(key)).with_model("gpt-4o-mini"),
+                OpenAI::new(OpenAIConfig::default().with_api_key(key)).with_model("gpt-4.1-mini"),
             ),
         }
     }

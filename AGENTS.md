@@ -112,7 +112,7 @@ as a custom `langchain-rust` Tool using `gpt-4o-mini-transcribe`; startup requir
 backend-only `OPENAI_KEY`. Telegram Ogg/Opus voice files stay in memory (20 MB
 maximum), and replies are HTML-escaped and split. A provider-neutral
 `VoiceAssistant` uses a bounded `langchain-rust` tool-calling conversation with
-OpenAI `gpt-4o-mini` and the same key. Tools list all current daily work with
+OpenAI `gpt-4.1-mini` and the same key. Tools list all current daily work with
 namespaced IDs, then complete an explicitly requested listed task/subtask, and
 also list categories and active tasks, then create an explicitly requested
 ordinary task with optional ordered steps or append one step to a listed active
