@@ -5,5 +5,8 @@ export function reminderDate(task: ReminderTask) {
 }
 
 export function normalizeReminders(items: ReminderTask[]) {
-  return items.map((item) => item.expires_at !== null && item.expires_at <= Date.now() ? { ...item, expires_at: null } : item)
+  return items.map((item) => ({ ...item,
+    expires_at: item.expires_at !== null && item.expires_at > Date.now() ? item.expires_at : null,
+    available_today_until: item.available_today_until !== null && item.available_today_until > Date.now() ? item.available_today_until : null,
+  }))
 }

@@ -19,6 +19,15 @@ impl ScheduledService {
     pub async fn daily(&self) -> Result<Vec<ScheduledOccurrence>, ServiceError> {
         Ok(self.dao.daily().await?)
     }
+    pub async fn select_today(&self, id: i64) -> Result<Vec<ScheduledOccurrence>, ServiceError> {
+        validate_id(id)?;
+        if !self.dao.select_today(id).await? {
+            return Err(ServiceError::NotFound(
+                "unfinished scheduled occurrence for today",
+            ));
+        }
+        self.daily().await
+    }
     pub async fn save(
         &self,
         id: Option<i64>,

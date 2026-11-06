@@ -14,6 +14,7 @@ pub trait ReminderDao: Send + Sync {
     async fn delete(&self, id: i64) -> Result<bool, DaoError>;
     async fn complete(&self, id: i64, completed: bool) -> Result<Option<ReminderTask>, DaoError>;
     async fn dismiss(&self, id: i64) -> Result<bool, DaoError>;
+    async fn select_today(&self, id: i64) -> Result<Option<ReminderTask>, DaoError>;
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError>;
 }
 
@@ -36,6 +37,7 @@ struct ReminderRow {
     timezone: String,
     completed: bool,
     expires_at: Option<i64>,
+    available_today_until: Option<i64>,
 }
 impl From<ReminderRow> for ReminderTask {
     fn from(r: ReminderRow) -> Self {
@@ -49,10 +51,13 @@ impl From<ReminderRow> for ReminderTask {
             },
             completed: r.completed,
             expires_at: r.expires_at,
+            available_today_until: r.available_today_until,
         }
     }
 }
-const COLUMNS: &str = "id, description, detailed_description, (extract(epoch FROM due_at)*1000)::bigint AS due_at, timezone, completed, CASE WHEN selected_until > statement_timestamp() THEN (extract(epoch FROM selected_until)*1000)::bigint END AS expires_at";
+const COLUMNS: &str = "id, description, detailed_description, (extract(epoch FROM due_at)*1000)::bigint AS due_at, timezone, completed, CASE WHEN selected_until > statement_timestamp() THEN (extract(epoch FROM selected_until)*1000)::bigint END AS expires_at,
+    CASE WHEN NOT completed AND (due_at AT TIME ZONE timezone)::date = (statement_timestamp() AT TIME ZONE timezone)::date
+        THEN (extract(epoch FROM (((due_at AT TIME ZONE timezone)::date + 1 + time '00:00') AT TIME ZONE timezone))*1000)::bigint END AS available_today_until";
 
 #[async_trait]
 impl ReminderDao for PgReminderDao {
@@ -108,6 +113,14 @@ impl ReminderDao for PgReminderDao {
     async fn dismiss(&self, id: i64) -> Result<bool, DaoError> {
         Ok(sqlx::query("UPDATE reminder_tasks SET selected_until=NULL WHERE id=$1 AND user_id=$2 AND selected_until > statement_timestamp()")
             .bind(id).bind(self.user_id).execute(&self.pool).await?.rows_affected() > 0)
+    }
+    async fn select_today(&self, id: i64) -> Result<Option<ReminderTask>, DaoError> {
+        Ok(sqlx::query_as::<_, ReminderRow>(&format!(
+            "UPDATE reminder_tasks SET selected_until = ((due_at AT TIME ZONE timezone)::date + 1 + time '02:00') AT TIME ZONE timezone
+             WHERE id=$1 AND user_id=$2 AND NOT completed
+                AND (due_at AT TIME ZONE timezone)::date = (statement_timestamp() AT TIME ZONE timezone)::date
+             RETURNING {COLUMNS}"
+        )).bind(id).bind(self.user_id).fetch_optional(&self.pool).await?.map(Into::into))
     }
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError> {
         Ok(

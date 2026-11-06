@@ -28,7 +28,7 @@ export function useWorkspace() {
         setTasks(nextTasks)
         setDailyTasks(nextDailyTasks.filter((item) => item.expires_at > Date.now()))
         setTomorrowTasks(nextTomorrow.filter((item) => item.expires_at > Date.now()))
-        setScheduledTasks(nextScheduled)
+        setScheduledTasks(normalizeScheduledTasks(nextScheduled))
         setScheduledDaily(nextScheduledDaily.filter((item) => item.expires_at > Date.now()))
         setReminders(normalizeReminders(nextReminders))
         setAuthorizationRequired(false)
@@ -50,9 +50,10 @@ export function useWorkspace() {
       setDailyTasks((items) => items.filter((item) => item.expires_at > Date.now()))
       setTomorrowTasks((items) => items.filter((item) => item.expires_at > Date.now()))
       setScheduledDaily((items) => items.filter((item) => item.expires_at > Date.now()))
+      setScheduledTasks(normalizeScheduledTasks)
       setReminders(normalizeReminders)
     }
-    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...tomorrowTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at), ...reminders.flatMap((item) => item.expires_at !== null ? [item.expires_at] : []))
+    const nextExpiry = Math.min(...dailyTasks.map((item) => item.expires_at), ...tomorrowTasks.map((item) => item.expires_at), ...scheduledDaily.map((item) => item.expires_at), ...scheduledTasks.flatMap((item) => item.available_today_until !== null ? [item.available_today_until] : []), ...reminders.flatMap((item) => [item.expires_at, item.available_today_until].filter((time): time is number => time !== null)))
     const timer = Number.isFinite(nextExpiry) ? window.setTimeout(expire, Math.max(0, nextExpiry - Date.now())) : undefined
     window.addEventListener('focus', expire)
     document.addEventListener('visibilitychange', expire)
@@ -61,7 +62,7 @@ export function useWorkspace() {
       window.removeEventListener('focus', expire)
       document.removeEventListener('visibilitychange', expire)
     }
-  }, [dailyTasks, tomorrowTasks, scheduledDaily, reminders])
+  }, [dailyTasks, tomorrowTasks, scheduledDaily, scheduledTasks, reminders])
 
   useEffect(() => {
     if (loading || authorizationRequired) return
@@ -72,10 +73,11 @@ export function useWorkspace() {
       pending = true
       const version = mutationVersion.current
       try {
-        const [items, nextReminders] = await Promise.all([api.listScheduledDaily(controller.signal), api.listReminders(controller.signal)])
+        const [items, nextReminders, nextScheduled] = await Promise.all([api.listScheduledDaily(controller.signal), api.listReminders(controller.signal), api.listScheduledTasks(controller.signal)])
         if (!controller.signal.aborted && !mutationInFlight.current && version === mutationVersion.current) {
           setScheduledDaily(items.filter((item) => item.expires_at > Date.now()))
           setReminders(normalizeReminders(nextReminders))
+          setScheduledTasks(normalizeScheduledTasks(nextScheduled))
         }
       } catch (cause) {
         if (!controller.signal.aborted) {
@@ -137,6 +139,10 @@ export function useWorkspace() {
   async function scheduledProgress(operation: () => Promise<ScheduledOccurrence[]>) {
     const next = await operation()
     setScheduledDaily(next)
+    setScheduledTasks((items) => items.map((task) => {
+      const occurrence = next.find((item) => item.scheduled_task_id === task.id)
+      return occurrence ? { ...task, available_today_until: occurrence.completed ? null : occurrence.expires_at } : task
+    }))
     const changed = next.some((item) => {
       const previous = scheduledDaily.find((pick) => pick.id === item.id)
       return previous && (previous.completed !== item.completed || JSON.stringify(previous.subtasks) !== JSON.stringify(item.subtasks))
@@ -173,8 +179,15 @@ export function useWorkspace() {
       await api.dismissReminder(id)
       setReminders((items) => items.map((item) => item.id === id ? { ...item, expires_at: null } : item))
     }),
+    selectReminderToday: (id: number) => mutate(async () => {
+      const [task] = normalizeReminders([await api.selectReminderToday(id)])
+      setReminders((items) => items.map((item) => item.id === id ? task : item))
+    }),
+    selectScheduledToday: (id: number) => mutate(async () => {
+      setScheduledDaily((await api.selectScheduledToday(id)).filter((item) => item.expires_at > Date.now()))
+    }),
     saveScheduledTask: (input: ScheduledTaskInput, id?: number) => mutate(async () => {
-      const task = await api.saveScheduledTask(input, id)
+      const [task] = normalizeScheduledTasks([await api.saveScheduledTask(input, id)])
       setScheduledTasks((items) => id === undefined ? [...items, task] : items.map((item) => item.id === id ? task : item))
       try { setScheduledDaily(await api.listScheduledDaily()) } catch (cause) {
         setError(`Schedule saved, but today’s occurrences could not be refreshed. ${errorMessage(cause)} Use Refresh to reload.`)
@@ -251,4 +264,8 @@ export function useWorkspace() {
 
 function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : 'Something went wrong. Please retry.'
+}
+
+function normalizeScheduledTasks(items: ScheduledTask[]) {
+  return items.map((item) => item.available_today_until !== null && item.available_today_until > Date.now() ? item : { ...item, available_today_until: null })
 }

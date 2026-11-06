@@ -65,7 +65,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/reminder-tasks/{id}/daily",
-            axum::routing::delete(reminder::dismiss),
+            axum::routing::delete(reminder::dismiss).post(reminder::select_today),
         )
         .route(
             "/scheduled-tasks",
@@ -76,6 +76,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(scheduled::update).delete(scheduled::delete),
         )
         .route("/scheduled-tasks/daily", get(scheduled::daily))
+        .route(
+            "/scheduled-tasks/{id}/daily",
+            axum::routing::post(scheduled::select_today),
+        )
         .route(
             "/scheduled-tasks/daily/{id}",
             axum::routing::delete(scheduled::dismiss),

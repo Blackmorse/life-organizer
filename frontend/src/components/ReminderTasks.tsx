@@ -34,16 +34,17 @@ function ReminderForm({ task, disabled, onSave, onCancel }: {
   </Stack>
 }
 
-export function ReminderTasks({ tasks, query, disabled, onSave, onDelete, onComplete }: {
+export function ReminderTasks({ tasks, query, disabled, onSave, onDelete, onComplete, onSelectToday }: {
   tasks: ReminderTask[], query: string, disabled: boolean
   onSave: (input: ReminderTaskInput, id?: number) => Promise<boolean>
   onDelete: (id: number) => Promise<boolean>
   onComplete: (id: number, completed: boolean) => Promise<boolean>
+  onSelectToday: (id: number) => Promise<boolean>
 }) {
   const [editing, setEditing] = useState<number | 'new' | null>(null)
   const visible = tasks.filter((item) => `${item.description} ${reminderDate(item)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).sort((a, b) => a.due_at - b.due_at || a.id - b.id)
   return <Box component="section" aria-label="Reminder tasks" sx={{ mt: 2 }}>
-    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>One-time tasks with an exact date and time. The bot gives a heads-up at 08:00 the day before, then offers to add them to Tasks of the day at 08:00 on their date, in the saved timezone.</Typography>
+    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>One-time tasks with an exact date and time. The bot gives a heads-up at 08:00 the day before, then offers them at 08:00 on their date, in the saved timezone. Use Add to today for an unfinished reminder due today, even if you skipped the offer.</Typography>
     <Button disabled={disabled || editing !== null} onClick={() => setEditing('new')}>Add reminder task</Button>
     {editing === 'new' && <Paper variant="outlined" sx={{ p: 2, mt: 2 }}><ReminderForm disabled={disabled} onSave={onSave} onCancel={() => setEditing(null)} /></Paper>}
     <List>{visible.map((task) => <ListItem key={task.id} disableGutters sx={{ display: 'block' }}>
@@ -52,6 +53,7 @@ export function ReminderTasks({ tasks, query, disabled, onSave, onDelete, onComp
         <Typography variant="body2" color="text.secondary">{reminderDate(task)}</Typography>
         <DetailedDescriptionDisclosure text={task.detailed_description} label={task.description} />
         {task.completed && <Chip label="Completed" size="small" sx={{ mt: 1 }} />}
+        {task.expires_at !== null ? <Chip label="In Tasks of the day" size="small" color="primary" sx={{ mt: 1 }} /> : !task.completed && task.available_today_until !== null && <Button aria-label={`Add to today: ${task.description}`} disabled={disabled} onClick={() => void onSelectToday(task.id)}>Add to today</Button>}
         <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
           <Button disabled={disabled || editing !== null} onClick={() => setEditing(task.id)}>Edit reminder</Button>
           <Button disabled={disabled} onClick={() => void onComplete(task.id, !task.completed)}>{task.completed ? 'Reopen reminder' : 'Complete reminder'}</Button>

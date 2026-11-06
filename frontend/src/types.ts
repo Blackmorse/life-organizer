@@ -39,7 +39,10 @@ export interface ScheduledTaskInput {
   subtasks: Subtask[]
 }
 
-export interface ScheduledTask extends ScheduledTaskInput { id: number }
+export interface ScheduledTask extends ScheduledTaskInput {
+  id: number
+  available_today_until: number | null
+}
 
 export interface ScheduledOccurrence {
   id: number
@@ -61,4 +64,5 @@ export interface ReminderTask extends ReminderTaskInput {
   id: number
   completed: boolean
   expires_at: number | null
+  available_today_until: number | null
 }

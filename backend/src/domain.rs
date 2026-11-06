@@ -26,6 +26,8 @@ pub struct ReminderTask {
     pub details: ReminderTaskInput,
     pub completed: bool,
     pub expires_at: Option<i64>,
+    /// End of today's manual-selection window, or None when not eligible.
+    pub available_today_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,7 @@ pub struct ScheduledTaskInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTask {
     pub id: i64,
+    pub available_today_until: Option<i64>,
     #[serde(flatten)]
     pub details: ScheduledTaskInput,
 }

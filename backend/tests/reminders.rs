@@ -38,6 +38,76 @@ async fn prepare_today(db: &TestDb) -> i64 {
 }
 
 #[tokio::test]
+async fn manual_reminder_selection_uses_saved_calendar_date_and_preserves_details_and_expiry() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(42)
+        .await
+        .unwrap();
+    // Include early local hours and zones on opposite sides of UTC.
+    let early_zone: String = sqlx::query_scalar("SELECT name FROM pg_timezone_names WHERE name LIKE '%/%' AND extract(hour FROM statement_timestamp() AT TIME ZONE name) < 2 LIMIT 1")
+        .fetch_one(&db.pool).await.unwrap();
+    for zone in [
+        early_zone.as_str(),
+        "Pacific/Kiritimati",
+        "America/Los_Angeles",
+    ] {
+        for days in [-1, 0, 1] {
+            let due_at: i64 = sqlx::query_scalar("SELECT (extract(epoch FROM (((statement_timestamp() AT TIME ZONE $1)::date + $2 + time '00:30') AT TIME ZONE $1))*1000)::bigint")
+                .bind(zone).bind(days).fetch_one(&db.pool).await.unwrap();
+            let task = svc
+                .save(
+                    None,
+                    ReminderTaskInput {
+                        description: "Manual appointment".into(),
+                        detailed_description: "Keep notes".into(),
+                        due_at,
+                        timezone: zone.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            if days != 0 {
+                assert_eq!(task.available_today_until, None);
+                assert!(svc.select_today(task.id).await.is_err());
+                continue;
+            }
+            assert!(task.available_today_until.is_some());
+            assert!(service(&db, other.id).select_today(task.id).await.is_err());
+            let selected = svc.select_today(task.id).await.unwrap();
+            assert_eq!(selected.details, task.details);
+            assert!(!selected.completed);
+            assert!(selected.expires_at.unwrap() > selected.available_today_until.unwrap());
+            assert_eq!(svc.select_today(task.id).await.unwrap(), selected);
+            let correct: bool = sqlx::query_scalar("SELECT selected_until = ((due_at AT TIME ZONE timezone)::date + 1 + time '02:00') AT TIME ZONE timezone FROM reminder_tasks WHERE id=$1")
+                .bind(task.id).fetch_one(&db.pool).await.unwrap();
+            assert!(correct);
+            svc.dismiss(task.id).await.unwrap();
+            assert_eq!(svc.select_today(task.id).await.unwrap(), selected);
+            svc.complete(task.id, true).await.unwrap();
+            assert!(svc.select_today(task.id).await.is_err());
+            assert_eq!(
+                svc.list()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.id == task.id)
+                    .unwrap()
+                    .available_today_until,
+                None
+            );
+        }
+    }
+    assert!(svc.select_today(0).await.is_err());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM morning_offers")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "Manual selection needs no morning offer");
+}
+
+#[tokio::test]
 async fn reminder_crud_validation_ownership_and_exact_instant() {
     let db = TestDb::new().await;
     let svc = service(&db, db.user.id);
@@ -739,6 +809,44 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(saved.get("urgency").is_none());
     let id = saved["id"].as_i64().unwrap();
+    let select_path = format!("/reminder-tasks/{id}/daily");
+    for user in [TELEGRAM_ID, TELEGRAM_ID + 1] {
+        let response = app
+            .clone()
+            .oneshot(request("POST", &select_path, serde_json::Value::Null, user))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "Future or unowned reminder cannot be added"
+        );
+    }
+    let today = input(&db, 0).await;
+    app.clone()
+        .oneshot(request(
+            "PUT",
+            &format!("/reminder-tasks/{id}"),
+            serde_json::to_value(today).unwrap(),
+            TELEGRAM_ID,
+        ))
+        .await
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &select_path,
+            serde_json::Value::Null,
+            TELEGRAM_ID,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let selected: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(selected["expires_at"].is_i64());
+    assert_eq!(selected["completed"], false);
     let response = app
         .clone()
         .oneshot(request(

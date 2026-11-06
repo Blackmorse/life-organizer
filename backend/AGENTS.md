@@ -151,11 +151,13 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | DELETE | `/reminder-tasks/{id}` | Delete reminder and its offer links (`204`). |
 | PUT | `/reminder-tasks/{id}/completion` | Set completion and return reminder (`200`). |
 | DELETE | `/reminder-tasks/{id}/daily` | Remove active daily selection, preserving reminder/progress (`204`). |
+| POST | `/reminder-tasks/{id}/daily` | Add today's unfinished reminder; return reminder (`200`). |
 | GET | `/scheduled-tasks` | List owned recurring templates (`200`). |
 | POST | `/scheduled-tasks` | Create a category-free recurring template (`201`). |
 | PUT | `/scheduled-tasks/{id}` | Replace template details/schedule (`200`). |
 | DELETE | `/scheduled-tasks/{id}` | Delete template and its occurrences (`204`). |
 | GET | `/scheduled-tasks/daily` | Generate candidates and list today's accepted, visible, unexpired occurrences (`200`). |
+| POST | `/scheduled-tasks/{id}/daily` | Generate/select today's unfinished occurrence for template ID; return daily occurrences (`200`). |
 | PUT | `/scheduled-tasks/daily/{id}/completion` | Set occurrence completion; return current occurrences (`200`). |
 | PUT | `/scheduled-tasks/daily/{id}/subtasks` | Replace occurrence steps and recalculate completion; return occurrences (`200`). |
 | DELETE | `/scheduled-tasks/daily/{id}` | Skip occurrence for today only; return current occurrences (`200`). |
@@ -407,6 +409,9 @@ against PostgreSQL's timezone catalog. Subtasks default to an empty list.
 Scheduled tasks have no urgency; migration `0010_scheduled_tasks_without_urgency.sql`
 removes urgency from templates and occurrences while preserving existing progress.
 Templates return the input fields plus generated `id`.
+Template responses also include nullable `available_today_until` (Unix milliseconds):
+the current unfinished occurrence's expiry, or a due template's prospective expiry
+when not generated yet. Listing templates never creates or selects occurrences.
 Template step flags are normalized to false; step IDs are not accepted.
 Descriptions and step descriptions must be nonblank. Unknown fields are rejected.
 
@@ -415,7 +420,16 @@ planning day, using `daily_reset_at` and local calendar dates (including DST).
 Planning days start at 02:00; before then, the previous weekday still applies.
 An occurrence snapshots description, timezone, and steps, all initially unchecked.
 New occurrences are unselected candidates, absent from daily reads and summaries
-until the owner accepts their morning offer. Progress writes and removal require selection.
+until the owner accepts their morning offer or adds them manually. Progress writes
+and removal require selection.
+Owners can also explicitly select via `POST /scheduled-tasks/{template_id}/daily`
+without a body, including before 08:00, after skipping/declining offers, or after
+creating a due template. It lazily generates the current day, selects the owned
+unexpired unfinished occurrence, and unhides a removed occurrence without resetting
+its snapshot, steps, or progress. Repeated calls preserve identity and expiry.
+Off-day, completed, expired, missing, and unowned targets return `404` (invalid IDs
+return `400`). Existing occurrence snapshots determine eligibility after template
+edits; future snapshots follow the changed schedule. Morning decisions are unchanged.
 Uniqueness on `(scheduled_task_id, planning_date)` prevents duplicates under
 concurrent sweeps/requests. Generation runs every 30 seconds in the existing worker,
 on scheduled daily reads, and before summary resolution. Restart catches up today's
@@ -456,6 +470,14 @@ not a naive local datetime. The frontend converts device-local input to an insta
 timezone is validated against PostgreSQL. No categories, urgency, or subtasks.
 Unknown fields and blank descriptions are rejected. Responses add `id`,
 `completed`, and nullable `expires_at` (Unix milliseconds of daily selection expiry).
+Responses also include nullable `available_today_until`: the end of the saved-zone
+calendar date when this unfinished reminder is due today. The UI uses this eligibility
+window plus daily membership to show Add to today. `POST /reminder-tasks/{id}/daily`
+without a body selects an owned unfinished reminder only on its saved-zone calendar
+date, regardless of morning-offer state or event time. Repeated selection is
+idempotent; expiry remains the following calendar day's 02:00, including DST.
+Future, past, completed, missing, and unowned reminders return `404`; invalid IDs
+return `400`. Neither selection endpoint completes work or sends a bot report.
 Expired selections are excluded from summaries even when the app is closed.
 Completion takes `{"completed":true}` or false and preserves selection and details.
 Completed reminders remain editable/reopenable in their own list; ordinary-task

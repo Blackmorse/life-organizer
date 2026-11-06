@@ -16,6 +16,13 @@ impl ReminderService {
     pub async fn list(&self) -> Result<Vec<ReminderTask>, ServiceError> {
         Ok(self.dao.list().await?)
     }
+    pub async fn select_today(&self, id: i64) -> Result<ReminderTask, ServiceError> {
+        validate_id(id)?;
+        self.dao
+            .select_today(id)
+            .await?
+            .ok_or(ServiceError::NotFound("unfinished reminder for today"))
+    }
     pub async fn save(
         &self,
         id: Option<i64>,

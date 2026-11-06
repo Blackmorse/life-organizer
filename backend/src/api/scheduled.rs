@@ -75,3 +75,9 @@ pub async fn dismiss(
 ) -> Result<Json<Vec<ScheduledOccurrence>>, ServiceError> {
     Ok(Json(w.scheduled.dismiss(id).await?))
 }
+pub async fn select_today(
+    Extension(w): Extension<Workspace>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<ScheduledOccurrence>>, ServiceError> {
+    Ok(Json(w.scheduled.select_today(id).await?))
+}

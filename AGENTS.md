@@ -159,6 +159,11 @@ the destination, frontend would expand/focus it, and existing user ownership
 checks would still apply. See the subproject guides for integration options.
 
 Reminder tasks have their own UI tab and user-owned `reminder_tasks` table.
+Reminder and Scheduled tabs have per-task **Add to today** buttons for unfinished
+work due today but absent from the daily list. Manual selection works independently
+of morning offers, is idempotent, and restores removed scheduled occurrences with
+their existing progress. Saved timezone determines eligibility: reminder calendar
+date, or scheduled planning day starting at 02:00. Original expiry rules apply.
 The saved timezone defines calendar dates: at 08:00 on the preceding date the
 bot lists tomorrow's reminders (informational only); at 08:00 on the event date
 it offers them alongside scheduled work and carryover with the existing Yes/No

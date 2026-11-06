@@ -20,6 +20,7 @@ pub trait ScheduledDao: Send + Sync {
         steps: Option<&[Subtask]>,
     ) -> Result<bool, DaoError>;
     async fn dismiss(&self, id: i64) -> Result<bool, DaoError>;
+    async fn select_today(&self, id: i64) -> Result<bool, DaoError>;
     async fn valid_timezone(&self, timezone: &str) -> Result<bool, DaoError>;
 }
 
@@ -40,6 +41,21 @@ impl PgScheduledDao {
     pub fn new(pool: PgPool, user_id: i64) -> Self {
         Self { pool, user_id }
     }
+
+    async fn templates(&self, id: Option<i64>) -> Result<Vec<ScheduledTask>, DaoError> {
+        sqlx::query_as::<_, TemplateRow>("SELECT s.id, s.description, s.detailed_description, s.weekdays, s.timezone, s.subtasks,
+            CASE WHEN o.id IS NOT NULL THEN
+                CASE WHEN NOT o.completed AND o.expires_at > statement_timestamp() THEN (extract(epoch FROM o.expires_at)*1000)::bigint END
+            WHEN extract(isodow FROM (daily_reset_at(s.timezone, statement_timestamp()) AT TIME ZONE s.timezone)::date - 1)::smallint = ANY(s.weekdays)
+                THEN (extract(epoch FROM daily_reset_at(s.timezone, statement_timestamp()))*1000)::bigint END AS available_today_until
+            FROM scheduled_tasks s LEFT JOIN LATERAL (
+                SELECT o.id, o.completed, o.expires_at FROM scheduled_occurrences o WHERE o.scheduled_task_id=s.id
+                    AND o.planning_date = (daily_reset_at(o.timezone, statement_timestamp()) AT TIME ZONE o.timezone)::date - 1
+                ORDER BY o.id DESC LIMIT 1
+            ) o ON true
+            WHERE s.user_id=$1 AND ($2::bigint IS NULL OR s.id=$2) ORDER BY s.id")
+            .bind(self.user_id).bind(id).fetch_all(&self.pool).await?.into_iter().map(TemplateRow::entity).collect()
+    }
 }
 
 #[derive(FromRow)]
@@ -50,11 +66,13 @@ struct TemplateRow {
     weekdays: Vec<i16>,
     timezone: String,
     subtasks: Json<Vec<Subtask>>,
+    available_today_until: Option<i64>,
 }
 impl TemplateRow {
     fn entity(self) -> Result<ScheduledTask, DaoError> {
         Ok(ScheduledTask {
             id: self.id,
+            available_today_until: self.available_today_until,
             details: ScheduledTaskInput {
                 description: self.description,
                 detailed_description: self.detailed_description,
@@ -88,8 +106,7 @@ impl ScheduledDao for PgScheduledDao {
         )
     }
     async fn list(&self) -> Result<Vec<ScheduledTask>, DaoError> {
-        sqlx::query_as::<_, TemplateRow>("SELECT id, description, detailed_description, weekdays, timezone, subtasks FROM scheduled_tasks WHERE user_id = $1 ORDER BY id")
-            .bind(self.user_id).fetch_all(&self.pool).await?.into_iter().map(TemplateRow::entity).collect()
+        self.templates(None).await
     }
     async fn save(
         &self,
@@ -97,15 +114,18 @@ impl ScheduledDao for PgScheduledDao {
         input: &ScheduledTaskInput,
     ) -> Result<Option<ScheduledTask>, DaoError> {
         let row = if let Some(id) = id {
-            sqlx::query_as::<_, TemplateRow>("UPDATE scheduled_tasks SET description=$3, weekdays=$4, timezone=$5, subtasks=$6, detailed_description=$7 WHERE id=$1 AND user_id=$2 RETURNING id, description, detailed_description, weekdays, timezone, subtasks")
+            sqlx::query_scalar::<_, i64>("UPDATE scheduled_tasks SET description=$3, weekdays=$4, timezone=$5, subtasks=$6, detailed_description=$7 WHERE id=$1 AND user_id=$2 RETURNING id")
                 .bind(id).bind(self.user_id).bind(&input.description)
                 .bind(&input.weekdays).bind(&input.timezone).bind(Json(&input.subtasks)).bind(&input.detailed_description).fetch_optional(&self.pool).await?
         } else {
-            sqlx::query_as::<_, TemplateRow>("INSERT INTO scheduled_tasks(user_id, description, weekdays, timezone, subtasks, detailed_description) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, description, detailed_description, weekdays, timezone, subtasks")
+            sqlx::query_scalar::<_, i64>("INSERT INTO scheduled_tasks(user_id, description, weekdays, timezone, subtasks, detailed_description) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id")
                 .bind(self.user_id).bind(&input.description)
                 .bind(&input.weekdays).bind(&input.timezone).bind(Json(&input.subtasks)).bind(&input.detailed_description).fetch_optional(&self.pool).await?
         };
-        row.map(TemplateRow::entity).transpose()
+        match row {
+            Some(id) => Ok(self.templates(Some(id)).await?.pop()),
+            None => Ok(None),
+        }
     }
     async fn delete(&self, id: i64) -> Result<bool, DaoError> {
         Ok(
@@ -161,6 +181,15 @@ impl ScheduledDao for PgScheduledDao {
     }
     async fn dismiss(&self, id: i64) -> Result<bool, DaoError> {
         Ok(sqlx::query("UPDATE scheduled_occurrences o SET hidden=true FROM scheduled_tasks s WHERE o.id=$1 AND s.id=o.scheduled_task_id AND s.user_id=$2 AND o.selected AND o.expires_at > statement_timestamp()")
+            .bind(id).bind(self.user_id).execute(&self.pool).await?.rows_affected() > 0)
+    }
+    async fn select_today(&self, id: i64) -> Result<bool, DaoError> {
+        // Generate lazily so a newly created due schedule can be selected immediately.
+        generate_scheduled(&self.pool, Some(self.user_id)).await?;
+        Ok(sqlx::query("UPDATE scheduled_occurrences o SET selected=true, hidden=false
+            FROM scheduled_tasks s WHERE o.scheduled_task_id=s.id AND s.id=$1 AND s.user_id=$2
+                AND NOT o.completed AND o.expires_at > statement_timestamp()
+                AND o.planning_date = (daily_reset_at(o.timezone, statement_timestamp()) AT TIME ZONE o.timezone)::date - 1")
             .bind(id).bind(self.user_id).execute(&self.pool).await?.rows_affected() > 0)
     }
 }

@@ -47,6 +47,78 @@ async fn accept_scheduled(db: &TestDb) {
 }
 
 #[tokio::test]
+async fn manual_today_selection_is_owned_idempotent_and_restores_progress_after_removal() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    let task = svc.save(None, input()).await.unwrap();
+    assert!(task.available_today_until.is_some());
+    assert!(svc.daily().await.unwrap().is_empty());
+    // An ignored or explicitly declined offer does not block manual selection.
+    let store = backend::dao::morning::MorningStore::new(db.pool.clone());
+    store.sweep().await.unwrap();
+    sqlx::query("UPDATE morning_offers SET state='declined', backlog_ready=true")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(123)
+        .await
+        .unwrap();
+    assert!(service(&db, other.id).select_today(task.id).await.is_err());
+    assert!(svc.select_today(0).await.is_err());
+    let selected = svc.select_today(task.id).await.unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(svc.select_today(task.id).await.unwrap(), selected);
+    let occurrence = &selected[0];
+    let mut steps = occurrence.subtasks.clone();
+    steps[0].completed = true;
+    let progress = svc
+        .progress(occurrence.id, None, Some(steps))
+        .await
+        .unwrap();
+    svc.dismiss(occurrence.id).await.unwrap();
+    assert!(svc.daily().await.unwrap().is_empty());
+    assert!(svc.list().await.unwrap()[0].available_today_until.is_some());
+    assert_eq!(svc.select_today(task.id).await.unwrap(), progress);
+    svc.progress(occurrence.id, Some(true), None).await.unwrap();
+    svc.dismiss(occurrence.id).await.unwrap();
+    assert!(svc.select_today(task.id).await.is_err());
+    assert_eq!(svc.list().await.unwrap()[0].available_today_until, None);
+    assert!(!svc.list().await.unwrap()[0].details.subtasks[0].completed);
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT bool_and(state='declined') FROM morning_offers")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn manual_scheduled_selection_uses_saved_planning_day_and_rejects_off_days_and_expiry() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    // Pick a real IANA zone currently before 02:00: yesterday's weekday must apply.
+    let (zone, weekday): (String, i16) = sqlx::query_as("SELECT name, extract(isodow FROM (statement_timestamp() AT TIME ZONE name)::date - 1)::smallint FROM pg_timezone_names WHERE name LIKE '%/%' AND extract(hour FROM statement_timestamp() AT TIME ZONE name) < 2 LIMIT 1")
+        .fetch_one(&db.pool).await.unwrap();
+    let mut value = input();
+    value.timezone = zone;
+    value.weekdays = vec![weekday];
+    let task = svc.save(None, value.clone()).await.unwrap();
+    assert!(task.available_today_until.is_some());
+    let selected = svc.select_today(task.id).await.unwrap();
+    assert_eq!(selected[0].expires_at, task.available_today_until.unwrap());
+    value.weekdays = vec![weekday % 7 + 1];
+    let off_day = svc.save(None, value).await.unwrap();
+    assert_eq!(off_day.available_today_until, None);
+    assert!(svc.select_today(off_day.id).await.is_err());
+    sqlx::query("UPDATE scheduled_occurrences SET expires_at=statement_timestamp()-interval '1 second', completed=false")
+        .execute(&db.pool).await.unwrap();
+    assert!(svc.select_today(task.id).await.is_err());
+    assert_eq!(svc.list().await.unwrap()[0].available_today_until, None);
+    assert!(svc.daily().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn detailed_descriptions_snapshot_with_steps_and_survive_progress() {
     let db = TestDb::new().await;
     let svc = service(&db, db.user.id);
@@ -380,6 +452,14 @@ async fn scheduled_routes_require_auth_schedule_and_owned_occurrences() {
     assert_eq!(status, 200);
     assert!(daily[0].get("urgency").is_none());
     let id = daily[0]["id"].as_i64().unwrap();
+    let select_path = format!("/scheduled-tasks/{}/daily", template["id"]);
+    assert_eq!(call("POST", &select_path, Value::Null, 456).await.0, 404);
+    assert_eq!(
+        call("POST", &select_path, Value::Null, support::TELEGRAM_ID)
+            .await
+            .1,
+        daily
+    );
     let path = format!("/scheduled-tasks/daily/{id}/completion");
     assert_eq!(
         call("PUT", &path, json!({"completed":true}), 456).await.0,

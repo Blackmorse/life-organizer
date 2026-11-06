@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { Box, Button, Checkbox, Collapse, FormControlLabel, FormGroup, Paper, Stack, TextField, Typography } from '@mui/material'
+import { Box, Button, Checkbox, Chip, Collapse, FormControlLabel, FormGroup, Paper, Stack, TextField, Typography } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import type { ScheduledTask, ScheduledTaskInput } from '../types'
+import type { ScheduledTask, ScheduledTaskInput, ScheduledOccurrence } from '../types'
 import { Subtasks } from './Subtasks'
 import { DetailedDescription } from './DetailedDescription'
 
@@ -38,23 +38,26 @@ function ScheduledForm({ task, disabled, onSave, onCancel }: {
   </Box>
 }
 
-export function ScheduledTasks({ tasks, query, disabled, onSave, onDelete }: {
+export function ScheduledTasks({ tasks, daily, query, disabled, onSave, onDelete, onSelectToday }: {
   tasks: ScheduledTask[], query: string, disabled: boolean
+  daily: ScheduledOccurrence[]
   onSave: (input: ScheduledTaskInput, id?: number) => Promise<boolean>
   onDelete: (id: number) => Promise<boolean>
+  onSelectToday: (id: number) => Promise<boolean>
 }) {
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<number | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
   const visible = tasks.filter((task) => [task.description, ...task.subtasks.map((step) => step.description)].some((text) => text.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))
   return <Box component="section" aria-label="Scheduled tasks" sx={{ mt: 2 }}>
-    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Recurring tasks have no category. On due days, the bot offers them at 08:00 in the schedule timezone. Accept the morning offer to add them to Tasks of the day. Completion and removal affect today only.</Typography>
+    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Recurring tasks have no category. On due days, the bot offers them at 08:00 in the schedule timezone. Accept the offer or use Add to today for today's unfinished occurrence. Completion and removal affect today only.</Typography>
     <Button startIcon={<AddIcon />} disabled={disabled || creating} onClick={() => setCreating(true)}>Add scheduled task</Button>
     {creating && <Paper variant="outlined" sx={{ p: 2, my: 2 }}><ScheduledForm disabled={disabled} onSave={onSave} onCancel={() => setCreating(false)} /></Paper>}
     <Stack spacing={1} sx={{ mt: 2 }}>{visible.map((task) => <Paper key={task.id} variant="outlined" sx={{ p: 2 }}>
       {editing === task.id ? <ScheduledForm task={task} disabled={disabled} onSave={onSave} onCancel={() => setEditing(null)} /> : <>
         <Button color="inherit" aria-label={`View scheduled task ${task.description}`} aria-expanded={expanded === task.id} onClick={() => setExpanded(expanded === task.id ? null : task.id)} sx={{ textAlign: 'left', justifyContent: 'flex-start', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.description}</Button>
         <Typography variant="body2" color="text.secondary">{task.weekdays.length === 7 ? 'Every day' : task.weekdays.map((day) => WEEKDAYS[day - 1]).join(', ')} · {task.timezone}</Typography>
+        {daily.some((item) => item.scheduled_task_id === task.id) ? <Chip label="In Tasks of the day" size="small" color="primary" sx={{ mt: 1 }} /> : task.available_today_until !== null && <Button aria-label={`Add to today: ${task.description}`} disabled={disabled} onClick={() => void onSelectToday(task.id)}>Add to today</Button>}
         <Collapse in={expanded === task.id} unmountOnExit>
           <DetailedDescription text={task.detailed_description} />
           {task.subtasks.length > 0 && <Box component="ol">{task.subtasks.map((step, index) => <Box component="li" key={index}><Typography sx={{ whiteSpace: 'pre-wrap' }}>{step.description}</Typography><DetailedDescription text={step.detailed_description} /></Box>)}</Box>}

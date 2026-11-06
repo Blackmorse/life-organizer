@@ -53,3 +53,9 @@ pub async fn dismiss(
     w.reminders.dismiss(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+pub async fn select_today(
+    Extension(w): Extension<Workspace>,
+    Path(id): Path<i64>,
+) -> Result<Json<ReminderTask>, ServiceError> {
+    Ok(Json(w.reminders.select_today(id).await?))
+}
