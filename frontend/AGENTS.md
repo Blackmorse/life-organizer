@@ -55,12 +55,13 @@ standalone browser.
   writes retain selection, and loading/saving disables planning controls. Later-date
   plans persist server-side; the calendar highlight reflects today/tomorrow picks.
 - Reminder tasks tab manages category-free one-time work with description and
-  required exact date/time, without urgency or subtasks. New dates are entered in
+  a required date and optional time, without urgency or subtasks. Blank time means
+  work can be done anytime during that date; it displays as **All day**. New dates are entered in
   device timezone and saved as Unix milliseconds plus IANA timezone. Existing
   instants/timezones survive description-only edits. At 08:00 the bot lists tomorrow's
   reminders, then offers same-day daily-list inclusion at 08:00 on their calendar
   date (including events before 02:00). Accepted reminders show exact saved-zone
-  time and a Reminder badge in Tasks of the day; completion updates the original
+  time or their date and All day, plus a Reminder badge in Tasks of the day; completion updates the original
   reminder and resends the current summary. Removing a daily pick keeps the
   reminder/progress; expiry preserves unfinished reminders. Reminders refresh with
   scheduled work every 30 seconds and on
@@ -259,7 +260,13 @@ remain `/categories` and `/tasks`, including `/{id}` for read/update/delete.
   and returns the updated reminder. Responses include nullable `available_today_until`
   (Unix milliseconds), the end of today's saved-zone selection window; `expires_at`
   still controls daily membership until the next calendar day's 02:00.
-  Input: `{description, due_at, timezone}`; `due_at` is Unix milliseconds. Responses
+  Input: `{description, due_at, timezone, all_day?}`; `due_at` is Unix milliseconds.
+  `all_day` defaults to false; true means only the saved-zone calendar date matters.
+  Forms send true with local midnight when time is blank, false with the entered
+  time otherwise. Responses include `all_day`. Description-only edits preserve
+  original instants/timezones; all-day edit forms use the saved-zone date even
+  when the device is in another timezone. Changing time mode clears daily selection
+  and invalidates old morning buttons. Responses
   add `{id, completed, expires_at}`; nullable `expires_at` marks daily selection and
   uses Unix milliseconds. `PUT /reminder-tasks/{id}/completion` takes `{completed}`
   and returns the reminder. `DELETE /reminder-tasks/{id}/daily` clears selection,

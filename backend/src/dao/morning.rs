@@ -129,11 +129,11 @@ impl MorningStore {
             )
             .collect();
         let reminders: Vec<(i64, String, String)> = sqlx::query_as(
-            "SELECT r.id, r.description || ' — ' || to_char(r.due_at AT TIME ZONE r.timezone, 'YYYY-MM-DD HH24:MI') || ' (' || r.timezone || ')', i.kind
+            "SELECT r.id, r.description || ' — ' || to_char(r.due_at AT TIME ZONE r.timezone, CASE WHEN r.all_day THEN 'YYYY-MM-DD' ELSE 'YYYY-MM-DD HH24:MI' END) || CASE WHEN r.all_day THEN ' (All day)' ELSE '' END || ' (' || r.timezone || ')', i.kind
              FROM morning_offer_reminder_items i JOIN morning_offers m ON m.id=i.offer_id
              JOIN reminder_tasks r ON r.id=i.reminder_id
              WHERE i.offer_id=$1 AND r.user_id=m.user_id AND NOT r.completed
-                  AND r.due_at=i.due_at AND r.timezone=i.timezone
+                  AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.all_day=i.all_day
                   AND (i.kind='yesterday' OR r.selected_until IS NULL)
                   AND (i.kind='today'
                       OR (i.kind='tomorrow' AND (r.due_at AT TIME ZONE r.timezone)::date = (statement_timestamp() AT TIME ZONE r.timezone)::date + 1)
@@ -292,7 +292,7 @@ impl MorningStore {
                  JOIN morning_offer_reminder_items i ON i.reminder_id=r.id
                  JOIN morning_offers m ON m.id=i.offer_id
                  WHERE i.offer_id=$1 AND i.kind='today' AND r.user_id=$2 AND NOT r.completed
-                     AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.selected_until IS NULL
+                     AND r.due_at=i.due_at AND r.timezone=i.timezone AND r.all_day=i.all_day AND r.selected_until IS NULL
                  ORDER BY r.id FOR UPDATE OF r",
             )
             .bind(id)

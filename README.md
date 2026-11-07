@@ -13,7 +13,8 @@ through without losing sight of longer-term work.
 - **Plan your day:** Pick tasks or individual steps for today, plan ahead for
   tomorrow, and decide whether to carry unfinished work forward.
 - **Keep routines and dates in view:** Set recurring tasks and one-time reminders
-  alongside your everyday work.
+  alongside your everyday work. Reminders can have a specific time or be due
+  anytime during their chosen day.
 - **Track progress:** Complete tasks and steps, with finished tasks kept in an
   archive.
 - **Stay connected through Telegram:** Receive daily summaries and morning

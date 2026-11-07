@@ -22,6 +22,7 @@ async fn input(db: &TestDb, days: i32) -> ReminderTaskInput {
         description: "Dentist <&>".into(),
         detailed_description: String::new(),
         due_at,
+        all_day: false,
         timezone: "UTC".into(),
     }
 }
@@ -42,12 +43,15 @@ async fn prepare_today(db: &TestDb) -> i64 {
 async fn completed_reminder_cleanup_uses_next_local_0200_including_dst() {
     let db = TestDb::new().await;
     let svc = service(&db, db.user.id);
-    for (zone, date) in [
-        (chrono_tz::UTC, "2030-01-15"),
-        (chrono_tz::Europe::Berlin, "2030-03-30"), // Next 02:00 is a DST gap.
-        (chrono_tz::Europe::Berlin, "2030-10-26"), // Next 02:00 is a DST overlap.
-        (chrono_tz::Pacific::Kiritimati, "2030-01-15"),
-        (chrono_tz::America::Los_Angeles, "2030-01-15"),
+    for (zone, date, all_day) in [
+        (chrono_tz::UTC, "2030-01-15", false),
+        (chrono_tz::Europe::Berlin, "2030-03-30", false), // Next 02:00 is a DST gap.
+        (chrono_tz::Europe::Berlin, "2030-10-26", false), // Next 02:00 is a DST overlap.
+        (chrono_tz::Pacific::Kiritimati, "2030-01-15", false),
+        (chrono_tz::America::Los_Angeles, "2030-01-15", false),
+        (chrono_tz::Europe::Berlin, "2030-03-30", true),
+        (chrono_tz::Europe::Berlin, "2030-10-26", true),
+        (chrono_tz::Pacific::Kiritimati, "2030-01-15", true),
     ] {
         let day = date.parse::<chrono::NaiveDate>().unwrap();
         let boundary = backend::planning::at(zone, day.succ_opt().unwrap(), 2);
@@ -55,6 +59,7 @@ async fn completed_reminder_cleanup_uses_next_local_0200_including_dst() {
             description: "Completed appointment".into(),
             detailed_description: String::new(),
             due_at: backend::planning::at(zone, day, 0).timestamp_millis(),
+            all_day,
             timezone: zone.name().into(),
         };
         let done = svc.save(None, value.clone()).await.unwrap();
@@ -198,6 +203,7 @@ async fn manual_reminder_selection_uses_saved_calendar_date_and_preserves_detail
                         description: "Manual appointment".into(),
                         detailed_description: "Keep notes".into(),
                         due_at,
+                        all_day: false,
                         timezone: zone.into(),
                     },
                 )
@@ -897,7 +903,7 @@ async fn tomorrow_only_delivery_has_no_yes_no_prompt_and_is_not_repeated() {
 }
 
 #[tokio::test]
-async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
+async fn api_requires_date_rejects_urgency_and_scopes_mutations() {
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode},
@@ -905,7 +911,8 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
     use tower::ServiceExt;
     let db = TestDb::new().await;
     let app = db.app();
-    let value = input(&db, 1).await;
+    let mut value = input(&db, 1).await;
+    value.all_day = true;
     let request = |method: &str, path: &str, body: serde_json::Value, user| {
         Request::builder()
             .method(method)
@@ -916,8 +923,10 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
             .unwrap()
     };
     for body in [
-        serde_json::json!({"description":"Missing time","timezone":"UTC"}),
+        serde_json::json!({"description":"Missing date","timezone":"UTC"}),
         serde_json::json!({"description":"Unknown urgency","due_at":value.due_at,"timezone":"UTC","urgency":"soon"}),
+        serde_json::json!({"description":"Invalid mode","due_at":value.due_at,"timezone":"UTC","all_day":null}),
+        serde_json::json!({"description":"Invalid mode","due_at":value.due_at,"timezone":"UTC","all_day":"true"}),
     ] {
         let response = app
             .clone()
@@ -940,6 +949,7 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
     let saved: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(saved.get("urgency").is_none());
+    assert_eq!(saved["all_day"], true);
     let id = saved["id"].as_i64().unwrap();
     let select_path = format!("/reminder-tasks/{id}/daily");
     for user in [TELEGRAM_ID, TELEGRAM_ID + 1] {
@@ -954,7 +964,8 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
             "Future or unowned reminder cannot be added"
         );
     }
-    let today = input(&db, 0).await;
+    let mut today = input(&db, 0).await;
+    today.all_day = true;
     app.clone()
         .oneshot(request(
             "PUT",
@@ -979,6 +990,7 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert!(selected["expires_at"].is_i64());
     assert_eq!(selected["completed"], false);
+    assert_eq!(selected["all_day"], true);
     let response = app
         .clone()
         .oneshot(request(
@@ -1000,4 +1012,143 @@ async fn api_requires_exact_time_rejects_urgency_and_scopes_mutations() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn all_day_reminders_share_morning_and_daily_flows_without_displaying_a_time() {
+    use backend::dao::daily_work::{DailyWorkDao, PgDailyWorkDao};
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    let mut ids = Vec::new();
+    for offset in [-1, 0, 1] {
+        let mut value = input(&db, offset).await;
+        value.all_day = true;
+        value.description = format!("All day {offset}");
+        let saved = svc.save(None, value.clone()).await.unwrap();
+        assert_eq!(saved.details, value);
+        ids.push(saved.id);
+    }
+    let offer_id = prepare_today(&db).await;
+    sqlx::query("UPDATE morning_offers SET valid_until=(current_date + 1 + time '02:00') AT TIME ZONE 'UTC' WHERE id=$1")
+        .bind(offer_id).execute(&db.pool).await.unwrap();
+    let store = MorningStore::new(db.pool.clone());
+    let offers = store.unanswered(TELEGRAM_ID).await.unwrap();
+    let offer = offers.iter().find(|o| o.id == offer_id).unwrap();
+    for items in [&offer.items, &offer.tomorrow, &offer.yesterday] {
+        assert_eq!(items.len(), 1);
+        assert!(items[0].task.contains("(All day) (UTC)"));
+        assert!(!items[0].task.contains("15:30"));
+        assert!(!items[0].task.contains("00:00"));
+    }
+    assert_eq!(
+        store.decide(offer_id, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(1)
+    );
+    let selected = svc
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == ids[1])
+        .unwrap();
+    assert!(selected.details.all_day);
+    assert!(selected.expires_at.is_some());
+    assert_eq!(
+        svc.select_today(selected.id).await.unwrap().expires_at,
+        selected.expires_at
+    );
+    let summary = PgDailyDao::new(db.pool.clone(), db.user.id)
+        .summary()
+        .await
+        .unwrap();
+    assert_eq!(summary.len(), 1);
+    assert!(summary[0].task.contains("(All day)"));
+    let dao = PgDailyWorkDao::new(db.pool.clone(), db.user.id);
+    let listed = dao.list().await.unwrap().pop().unwrap();
+    assert_eq!(listed.task, summary[0].task);
+    assert!(dao.complete(&listed).await.unwrap());
+    assert!(
+        svc.list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == selected.id)
+            .unwrap()
+            .completed
+    );
+}
+
+#[tokio::test]
+async fn changing_only_time_mode_invalidates_selection_and_old_morning_buttons() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    let mut value = input(&db, 0).await;
+    let saved = svc.save(None, value.clone()).await.unwrap();
+    let offer = prepare_today(&db).await;
+    let selected = svc.select_today(saved.id).await.unwrap();
+    assert!(selected.expires_at.is_some());
+    value.description = "Renamed reminder".into();
+    assert_eq!(
+        svc.save(Some(saved.id), value.clone())
+            .await
+            .unwrap()
+            .expires_at,
+        selected.expires_at
+    );
+    value.all_day = true;
+    let changed = svc.save(Some(saved.id), value).await.unwrap();
+    assert!(changed.details.all_day);
+    assert_eq!(changed.expires_at, None);
+    let store = MorningStore::new(db.pool.clone());
+    assert!(
+        store.unanswered(TELEGRAM_ID).await.unwrap()[0]
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        store.decide(offer, TELEGRAM_ID, true).await.unwrap(),
+        Decision::Accepted(0)
+    );
+    // Manual selection remains available after the old offer was answered.
+    assert!(
+        svc.select_today(saved.id)
+            .await
+            .unwrap()
+            .expires_at
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn all_day_move_preserves_date_only_mode_and_saved_timezone_across_dst() {
+    use backend::dao::daily_work::{DailyWorkDao, PgDailyWorkDao};
+    let db = TestDb::new().await;
+    let id: i64 = sqlx::query_scalar("INSERT INTO reminder_tasks(user_id,description,due_at,timezone,all_day,selected_until) VALUES($1,'File taxes','2030-03-20 12:00:00Z','Europe/Berlin',true,statement_timestamp()+interval '1 hour') RETURNING id")
+        .bind(db.user.id).fetch_one(&db.pool).await.unwrap();
+    let dao = PgDailyWorkDao::new(db.pool.clone(), db.user.id);
+    let listed = dao.list().await.unwrap().pop().unwrap();
+    let moved = dao
+        .move_to_date(&listed, "2030-04-02", Some("America/New_York"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved.timezone, "Europe/Berlin");
+    let (date, all_day, selection): (String, bool, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as("SELECT to_char(due_at AT TIME ZONE timezone,'YYYY-MM-DD HH24:MI'),all_day,selected_until FROM reminder_tasks WHERE id=$1")
+        .bind(id).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(date, "2030-04-02 00:00");
+    assert!(all_day);
+    assert!(selection.is_none());
+}
+
+#[tokio::test]
+async fn optional_time_upgrade_preserves_existing_instants_progress_and_offer_links() {
+    let db = TestDb::new_at_version(18).await;
+    let id: i64 = sqlx::query_scalar("INSERT INTO reminder_tasks(user_id,description,due_at,timezone,completed,selected_until) VALUES ($1,'Legacy appointment','2030-03-20 08:45:00Z','Europe/Berlin',true,'2030-03-21 01:00:00Z') RETURNING id")
+        .bind(db.user.id).fetch_one(&db.pool).await.unwrap();
+    sqlx::query("WITH offer AS (INSERT INTO morning_offers(user_id,timezone,reset_at,due_at,valid_until) VALUES ($1,'Europe/Berlin','2030-03-20 01:00Z','2030-03-20 07:00Z','2030-03-21 01:00Z') RETURNING id) INSERT INTO morning_offer_reminder_items(offer_id,reminder_id,due_at,timezone,kind) SELECT o.id,r.id,r.due_at,r.timezone,'today' FROM offer o,reminder_tasks r WHERE r.id=$2")
+        .bind(db.user.id).bind(id).execute(&db.pool).await.unwrap();
+    backend::db::MIGRATOR.run(&db.pool).await.unwrap();
+    let preserved: bool = sqlx::query_scalar("SELECT NOT r.all_day AND NOT i.all_day AND r.due_at='2030-03-20 08:45Z'::timestamptz AND r.completed AND r.selected_until='2030-03-21 01:00Z'::timestamptz AND r.due_at=i.due_at AND r.timezone=i.timezone FROM reminder_tasks r JOIN morning_offer_reminder_items i ON i.reminder_id=r.id WHERE r.id=$1")
+        .bind(id).fetch_one(&db.pool).await.unwrap();
+    assert!(preserved);
 }

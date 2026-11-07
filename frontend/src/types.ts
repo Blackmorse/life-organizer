@@ -58,6 +58,7 @@ export interface ReminderTaskInput {
   description: string
   detailed_description?: string
   due_at: number
+  all_day?: boolean
   timezone: string
 }
 export interface ReminderTask extends ReminderTaskInput {

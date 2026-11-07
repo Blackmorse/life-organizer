@@ -14,8 +14,10 @@ pub struct ReminderTaskInput {
     pub description: String,
     #[serde(default)]
     pub detailed_description: String,
-    /// Exact instant in Unix milliseconds; timezone determines morning calendar dates.
+    /// Unix milliseconds; for all-day work, only the saved-zone date is meaningful.
     pub due_at: i64,
+    #[serde(default)]
+    pub all_day: bool,
     pub timezone: String,
 }
 

@@ -129,15 +129,18 @@ impl PgDailyWorkDao {
                 }
             }
             ["reminder", _] => {
-                let row: Option<(DateTime<Utc>, String)> = sqlx::query_as("SELECT due_at,timezone FROM reminder_tasks WHERE id=$1 AND user_id=$2 AND NOT completed AND selected_until > clock_timestamp() AND description || ' — ' || to_char(due_at AT TIME ZONE timezone, 'YYYY-MM-DD HH24:MI') || ' (' || timezone || ')'=$3 FOR UPDATE")
+                let row: Option<(DateTime<Utc>, String, bool)> = sqlx::query_as("SELECT due_at,timezone,all_day FROM reminder_tasks WHERE id=$1 AND user_id=$2 AND NOT completed AND selected_until > clock_timestamp() AND description || ' — ' || to_char(due_at AT TIME ZONE timezone, CASE WHEN all_day THEN 'YYYY-MM-DD' ELSE 'YYYY-MM-DD HH24:MI' END) || CASE WHEN all_day THEN ' (All day)' ELSE '' END || ' (' || timezone || ')'=$3 FOR UPDATE")
                     .bind(id).bind(self.user_id).bind(&listed.task).fetch_optional(&mut *tx).await?;
-                let Some((due, timezone)) = row else {
+                let Some((due, timezone, all_day)) = row else {
                     return Ok(None);
                 };
                 let now = maintenance::now(&mut tx).await?;
                 let (day, zone) = target(date, &timezone, now)?;
-                let due =
-                    planning::local_instant(zone, day.and_time(due.with_timezone(&zone).time()));
+                let due = if all_day {
+                    planning::at(zone, day, 0)
+                } else {
+                    planning::local_instant(zone, day.and_time(due.with_timezone(&zone).time()))
+                };
                 sqlx::query("UPDATE reminder_tasks SET due_at=$2,selected_until=NULL WHERE id=$1")
                     .bind(id)
                     .bind(due)

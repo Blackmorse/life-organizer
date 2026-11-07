@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Box, Button, Checkbox, Chip, IconButton, List, ListItem, Paper, Stack, TextField, Typography } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import type { ReminderTask, ReminderTaskInput } from '../types'
-import { reminderDate } from '../reminders'
+import { reminderDate, reminderInputDate } from '../reminders'
 import { DetailedDescriptionDisclosure } from './DetailedDescription'
 import { MoveDailyButton, type MoveDaily } from './MoveDailyButton'
 
@@ -18,18 +18,24 @@ function ReminderForm({ task, disabled, onSave, onCancel }: {
 }) {
   const [description, setDescription] = useState(task?.description ?? '')
   const [detailedDescription, setDetailedDescription] = useState(task?.detailed_description ?? '')
-  const [dateTime, setDateTime] = useState(task ? localInput(task.due_at) : '')
+  const initialDateTime = task ? localInput(task.due_at) : ''
+  const initialDate = task?.all_day ? reminderInputDate(task) : initialDateTime.split('T')[0]
+  const initialTime = task && !task.all_day ? initialDateTime.split('T')[1] : ''
+  const [date, setDate] = useState(initialDate)
+  const [time, setTime] = useState(initialTime)
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  const unchangedDate = task && localInput(task.due_at) === dateTime
+  const unchangedDate = task && initialDate === date && initialTime === time
+  const dueAt = new Date(`${date}T${time || '00:00'}`).getTime()
   return <Stack component="form" spacing={2} onSubmit={async (event) => {
     event.preventDefault()
-    if (await onSave({ description: description.trim(), detailed_description: detailedDescription, due_at: unchangedDate ? task.due_at : new Date(dateTime).getTime(), timezone: unchangedDate ? task.timezone : timezone }, task?.id)) onCancel()
+    if (await onSave({ description: description.trim(), detailed_description: detailedDescription, due_at: unchangedDate ? task.due_at : dueAt, all_day: !time, timezone: unchangedDate ? task.timezone : timezone }, task?.id)) onCancel()
   }}>
     <TextField label="Reminder description" required autoFocus value={description} disabled={disabled} onChange={(event) => setDescription(event.target.value)} />
     <TextField label="Detailed description" multiline minRows={3} value={detailedDescription} disabled={disabled} onChange={(event) => setDetailedDescription(event.target.value)} helperText="Optional. Shown only in expanded Mini App details." />
-    <TextField label="Date and time" type="datetime-local" required value={dateTime} disabled={disabled} onChange={(event) => setDateTime(event.target.value)} slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: '1970-01-01T00:00', max: '9998-12-31T23:59' } }} helperText={`Enter time in device timezone: ${timezone}. Existing reminder: ${task ? reminderDate(task) : 'new'}.`} />
+    <TextField label="Reminder date" type="date" required value={date} disabled={disabled} onChange={(event) => setDate(event.target.value)} slotProps={{ inputLabel: { shrink: true }, htmlInput: { min: '1970-01-01', max: '9998-12-31' } }} helperText={`Device timezone: ${timezone}. Existing reminder: ${task ? reminderDate(task) : 'new'}.`} />
+    <TextField label="Time (optional)" type="time" value={time} disabled={disabled} onChange={(event) => setTime(event.target.value)} slotProps={{ inputLabel: { shrink: true } }} helperText="Leave empty for a task to do anytime during this day." />
     <Stack direction="row" spacing={1}>
-      <Button type="submit" variant="contained" disabled={disabled || !description.trim() || !Number.isFinite(new Date(dateTime).getTime())}>Save reminder</Button>
+      <Button type="submit" variant="contained" disabled={disabled || !description.trim() || !Number.isFinite(dueAt)}>Save reminder</Button>
       <Button disabled={disabled} onClick={onCancel}>Cancel</Button>
     </Stack>
   </Stack>
@@ -45,7 +51,7 @@ export function ReminderTasks({ tasks, query, disabled, onSave, onDelete, onComp
   const [editing, setEditing] = useState<number | 'new' | null>(null)
   const visible = tasks.filter((item) => `${item.description} ${reminderDate(item)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).sort((a, b) => a.due_at - b.due_at || a.id - b.id)
   return <Box component="section" aria-label="Reminder tasks" sx={{ mt: 2 }}>
-    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>One-time tasks with an exact date and time. The bot gives a heads-up at 08:00 the day before, then offers them at 08:00 on their date, in the saved timezone. Use Add to today for an unfinished reminder due today, even if you skipped the offer.</Typography>
+    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>One-time tasks with a date and optional time. Leave time empty to do the task anytime during that day. The bot gives a heads-up at 08:00 the day before, then offers them at 08:00 on their date, in the saved timezone. Use Add to today for an unfinished reminder due today, even if you skipped the offer.</Typography>
     <Button disabled={disabled || editing !== null} onClick={() => setEditing('new')}>Add reminder task</Button>
     {editing === 'new' && <Paper variant="outlined" sx={{ p: 2, mt: 2 }}><ReminderForm disabled={disabled} onSave={onSave} onCancel={() => setEditing(null)} /></Paper>}
     <List>{visible.map((task) => <ListItem key={task.id} disableGutters sx={{ display: 'block' }}>

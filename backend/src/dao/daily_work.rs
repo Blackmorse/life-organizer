@@ -82,7 +82,7 @@ impl DailyWorkDao for PgDailyWorkDao {
              WHERE st.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp()
              UNION ALL
              SELECT 'reminder:' || r.id, r.description || ' — ' ||
-               to_char(r.due_at AT TIME ZONE r.timezone, 'YYYY-MM-DD HH24:MI') || ' (' || r.timezone || ')',
+               to_char(r.due_at AT TIME ZONE r.timezone, CASE WHEN r.all_day THEN 'YYYY-MM-DD' ELSE 'YYYY-MM-DD HH24:MI' END) || CASE WHEN r.all_day THEN ' (All day)' ELSE '' END || ' (' || r.timezone || ')',
                'Reminders', NULL::text, r.completed
              FROM reminder_tasks r WHERE r.user_id=$1 AND r.selected_until > statement_timestamp()
              ORDER BY 1",
@@ -206,7 +206,7 @@ impl DailyWorkDao for PgDailyWorkDao {
                 let changed = sqlx::query(
                     "UPDATE reminder_tasks SET completed=true WHERE id=$1 AND user_id=$2
                      AND selected_until > clock_timestamp() AND description || ' — ' ||
-                     to_char(due_at AT TIME ZONE timezone, 'YYYY-MM-DD HH24:MI') || ' (' || timezone || ')'=$3",
+                     to_char(due_at AT TIME ZONE timezone, CASE WHEN all_day THEN 'YYYY-MM-DD' ELSE 'YYYY-MM-DD HH24:MI' END) || CASE WHEN all_day THEN ' (All day)' ELSE '' END || ' (' || timezone || ')'=$3",
                 ).bind(id).bind(self.user_id).bind(&listed.task).execute(&mut *tx).await?;
                 if changed.rows_affected() == 0 {
                     return Ok(false);

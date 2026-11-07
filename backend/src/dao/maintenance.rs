@@ -229,7 +229,7 @@ pub async fn prepare_reminders_at(
             .fetch_one(&mut *tx)
             .await?;
         for (reminder, event, kind) in reminders {
-            sqlx::query("INSERT INTO morning_offer_reminder_items(offer_id,reminder_id,due_at,timezone,kind) SELECT m.id,r.id,r.due_at,r.timezone,$5 FROM morning_offers m,reminder_tasks r WHERE m.id=$1 AND m.state='pending' AND m.valid_until > $6 AND r.id=$2 AND r.user_id=m.user_id AND r.due_at=$3 AND r.timezone=$4 AND NOT r.completed AND ($5='yesterday' OR r.selected_until IS NULL) ON CONFLICT DO NOTHING")
+            sqlx::query("INSERT INTO morning_offer_reminder_items(offer_id,reminder_id,due_at,timezone,kind,all_day) SELECT m.id,r.id,r.due_at,r.timezone,$5,r.all_day FROM morning_offers m,reminder_tasks r WHERE m.id=$1 AND m.state='pending' AND m.valid_until > $6 AND r.id=$2 AND r.user_id=m.user_id AND r.due_at=$3 AND r.timezone=$4 AND NOT r.completed AND ($5='yesterday' OR r.selected_until IS NULL) ON CONFLICT DO NOTHING")
                     .bind(id).bind(reminder).bind(event).bind(&timezone).bind(kind).bind(instant).execute(&mut *tx).await?;
         }
         tx.commit().await?;

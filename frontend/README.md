@@ -20,23 +20,26 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   **Refresh** to load accepted picks. Future highlights clear at the target day's
   **2:00 AM**, when picks enter morning-offer storage. Backend must be running;
   restart catches up still-valid offers. Restart to apply `0014_tomorrow_tasks.sql`.
-- **Reminder tasks** manages one-time tasks with an exact date and time, without
-  category or urgency. Enter date/time in your device timezone; reminders retain
+- **Reminder tasks** manages one-time tasks with a required date and optional time,
+  without category or urgency. Leave **Time (optional)** blank for work to do anytime
+  during that day; lists and bot messages show **All day**. Enter date/time in your device timezone; reminders retain
   that saved timezone. At **8:00 AM on the preceding calendar date**, the bot lists
-  tomorrow's reminders with their times. At **8:00 AM on the event date**, it offers
+  tomorrow's reminders with their times or **All day**. At **8:00 AM on the event date**, it offers
   to include them in **Tasks of the day** alongside other morning suggestions.
   **Yes** adds today's reminders; **No** leaves them out. Tomorrow's notice is
   informational only. Messages also send when no other work is due. No additional
   alert is sent at the event time. Dates follow calendar days even for events before
-  2:00 AM. Accepted reminders show a **Reminder** badge and exact saved-zone time;
+  2:00 AM. Accepted reminders show a **Reminder** badge and saved-zone date with optional time;
   progress is saved to the original and included under **⏰ Reminders** in bot lists.
   Daily picks expire at **2:00 AM the next calendar day** without deleting reminders
-  or progress. Reminders never repeat or carry over. Completed/past reminders remain
-  in their tab for editing, reopening, or deletion. Rescheduling clears daily selection
+  or progress. Reminders never repeat or carry over. Unfinished past reminders remain
+  in their tab; completed reminders are deleted at 2:00 AM after their due date.
+  Until then they can be reopened. Rescheduling or changing time mode clears daily selection
   and invalidates old buttons; completion stays saved. The backend must be running;
   it catches up still-valid morning groups after downtime. Reminders created after
   their morning group was sent/answered do not join that offer. Restart backend to
-  apply `0012_reminder_tasks.sql`; the open app refreshes accepted work every 30 seconds
+  apply migrations, including `0019_reminder_optional_time.sql`; existing timed
+  reminders retain their times. The open app refreshes accepted work every 30 seconds
   and on focus, or use **Refresh**.
 - **Scheduled tasks** manages recurring tasks without categories. Create a
   description, choose at least one weekday (e.g. Monday, Wednesday, Friday),

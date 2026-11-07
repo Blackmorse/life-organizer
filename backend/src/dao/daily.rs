@@ -112,7 +112,7 @@ impl DailyDao for PgDailyDao {
               LEFT JOIN LATERAL jsonb_array_elements(o.subtasks) WITH ORDINALITY AS s(step, position) ON true
                WHERE st.user_id=$1 AND o.selected AND NOT o.hidden AND o.expires_at > statement_timestamp()
              UNION ALL
-               SELECT r.id, '⏰ Reminders', r.description || ' — ' || to_char(r.due_at AT TIME ZONE r.timezone, 'YYYY-MM-DD HH24:MI') || ' (' || r.timezone || ')',
+               SELECT r.id, '⏰ Reminders', r.description || ' — ' || to_char(r.due_at AT TIME ZONE r.timezone, CASE WHEN r.all_day THEN 'YYYY-MM-DD' ELSE 'YYYY-MM-DD HH24:MI' END) || CASE WHEN r.all_day THEN ' (All day)' ELSE '' END || ' (' || r.timezone || ')',
                    NULL::text, r.completed, 0::bigint, NULL::bigint, true
                FROM reminder_tasks r WHERE r.user_id=$1 AND r.selected_until > statement_timestamp()
              ORDER BY 1, 6",
