@@ -39,6 +39,140 @@ async fn prepare_today(db: &TestDb) -> i64 {
 }
 
 #[tokio::test]
+async fn completed_reminder_cleanup_uses_next_local_0200_including_dst() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    for (zone, date) in [
+        (chrono_tz::UTC, "2030-01-15"),
+        (chrono_tz::Europe::Berlin, "2030-03-30"), // Next 02:00 is a DST gap.
+        (chrono_tz::Europe::Berlin, "2030-10-26"), // Next 02:00 is a DST overlap.
+        (chrono_tz::Pacific::Kiritimati, "2030-01-15"),
+        (chrono_tz::America::Los_Angeles, "2030-01-15"),
+    ] {
+        let day = date.parse::<chrono::NaiveDate>().unwrap();
+        let boundary = backend::planning::at(zone, day.succ_opt().unwrap(), 2);
+        let value = ReminderTaskInput {
+            description: "Completed appointment".into(),
+            detailed_description: String::new(),
+            due_at: backend::planning::at(zone, day, 0).timestamp_millis(),
+            timezone: zone.name().into(),
+        };
+        let done = svc.save(None, value.clone()).await.unwrap();
+        svc.complete(done.id, true).await.unwrap();
+        let unfinished = svc.save(None, value.clone()).await.unwrap();
+        let reopened = svc.save(None, value.clone()).await.unwrap();
+        svc.complete(reopened.id, true).await.unwrap();
+        svc.complete(reopened.id, false).await.unwrap();
+        let rescheduled = svc.save(None, value.clone()).await.unwrap();
+        svc.complete(rescheduled.id, true).await.unwrap();
+        svc.save(
+            Some(rescheduled.id),
+            ReminderTaskInput {
+                due_at: backend::planning::at(zone, day.succ_opt().unwrap(), 15).timestamp_millis(),
+                ..value
+            },
+        )
+        .await
+        .unwrap();
+        for (instant, expected) in [
+            (boundary - chrono::Duration::milliseconds(1), true),
+            (boundary, false),
+            (boundary + chrono::Duration::days(3), false),
+        ] {
+            let mut tx = db.pool.begin().await.unwrap();
+            backend::dao::maintenance::expire_completed_reminders(&mut tx, None, instant)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reminder_tasks WHERE id=$1)")
+                    .bind(done.id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(exists, expected, "{zone} at {instant}");
+            let rescheduled_exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reminder_tasks WHERE id=$1)")
+                    .bind(rescheduled.id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                rescheduled_exists,
+                instant <= boundary,
+                "Rescheduling must use the new due date"
+            );
+        }
+        for id in [unfinished.id, reopened.id] {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reminder_tasks WHERE id=$1)")
+                    .bind(id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            assert!(exists);
+        }
+    }
+}
+
+#[tokio::test]
+async fn reminder_listing_cleans_only_owner_and_worker_catches_up_other_completed_reminders() {
+    let db = TestDb::new().await;
+    let svc = service(&db, db.user.id);
+    let other = PgUserDao::new(db.pool.clone())
+        .get_or_create(42)
+        .await
+        .unwrap();
+    let outsider = service(&db, other.id);
+    let old = input(&db, -3).await;
+    let done = svc.save(None, old.clone()).await.unwrap();
+    svc.complete(done.id, true).await.unwrap();
+    let unfinished = svc.save(None, old.clone()).await.unwrap();
+    let other_done = outsider.save(None, old).await.unwrap();
+    outsider.complete(other_done.id, true).await.unwrap();
+    let future = svc.save(None, input(&db, 1).await).await.unwrap();
+    svc.complete(future.id, true).await.unwrap();
+    // Offer links must cascade when an old completed reminder is deleted.
+    let offer: i64 = sqlx::query_scalar("INSERT INTO morning_offers(user_id,timezone,reset_at,due_at,valid_until) VALUES ($1,'UTC',statement_timestamp(),statement_timestamp(),statement_timestamp()+interval '1 day') RETURNING id")
+        .bind(db.user.id).fetch_one(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO morning_offer_reminder_items(offer_id,reminder_id,due_at,timezone,kind) SELECT $1,id,due_at,timezone,'today' FROM reminder_tasks WHERE id=$2")
+        .bind(offer).bind(done.id).execute(&db.pool).await.unwrap();
+    let listed = svc.list().await.unwrap();
+    assert_eq!(
+        listed.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![unfinished.id, future.id]
+    );
+    let links: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM morning_offer_reminder_items WHERE reminder_id=$1",
+    )
+    .bind(done.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(links, 0);
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reminder_tasks WHERE id=$1)")
+            .bind(other_done.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(exists, "Listing must not clean another owner's reminders");
+    MorningStore::new(db.pool.clone()).sweep().await.unwrap();
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reminder_tasks WHERE id=$1)")
+            .bind(other_done.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !exists,
+        "Worker catches up completed reminders after downtime"
+    );
+    assert!(outsider.list().await.unwrap().is_empty());
+    assert_eq!(svc.list().await.unwrap(), listed);
+}
+
+#[tokio::test]
 async fn manual_reminder_selection_uses_saved_calendar_date_and_preserves_details_and_expiry() {
     let db = TestDb::new().await;
     let svc = service(&db, db.user.id);

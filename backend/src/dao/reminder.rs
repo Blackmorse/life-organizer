@@ -62,15 +62,18 @@ const COLUMNS: &str = "id, description, detailed_description, (extract(epoch FRO
 #[async_trait]
 impl ReminderDao for PgReminderDao {
     async fn list(&self) -> Result<Vec<ReminderTask>, DaoError> {
-        Ok(sqlx::query_as::<_, ReminderRow>(&format!(
+        let mut tx = self.pool.begin().await?;
+        let instant = super::maintenance::now(&mut tx).await?;
+        super::maintenance::expire_completed_reminders(&mut tx, Some(self.user_id), instant)
+            .await?;
+        let rows = sqlx::query_as::<_, ReminderRow>(&format!(
             "SELECT {COLUMNS} FROM reminder_tasks WHERE user_id=$1 ORDER BY due_at, id"
         ))
         .bind(self.user_id)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect())
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
     async fn save(
         &self,

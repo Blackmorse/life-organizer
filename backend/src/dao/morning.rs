@@ -38,6 +38,7 @@ impl MorningStore {
             .execute(&self.pool).await?;
         let mut tx = self.pool.begin().await?;
         let instant = super::maintenance::now(&mut tx).await?;
+        super::maintenance::expire_completed_reminders(&mut tx, None, instant).await?;
         // Both tables share parent locks. Acquire their union in stable order
         // before preserving either table, avoiding cross-table lock inversions.
         sqlx::query("SELECT t.id FROM tasks t WHERE EXISTS(SELECT 1 FROM daily_tasks d WHERE d.task_id=t.id AND d.expires_at <= $1) OR EXISTS(SELECT 1 FROM tomorrow_tasks d WHERE d.task_id=t.id AND d.expires_at <= $1) ORDER BY t.id FOR UPDATE")

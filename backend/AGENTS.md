@@ -155,7 +155,7 @@ an owner. Authenticated responses use `Cache-Control: no-store`.
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/me` | Current user `{id, telegram_id}` (`200`). |
-| GET | `/reminder-tasks` | List owned one-time reminders, including completed/past reminders (`200`). |
+| GET | `/reminder-tasks` | Clean expired completed reminders and list owned remaining reminders (`200`). |
 | POST | `/reminder-tasks` | Create reminder (`201`). |
 | PUT | `/reminder-tasks/{id}` | Replace reminder description, exact instant, timezone (`200`). |
 | DELETE | `/reminder-tasks/{id}` | Delete reminder and its offer links (`204`). |
@@ -542,8 +542,13 @@ Future, past, completed, missing, and unowned reminders return `404`; invalid ID
 return `400`. Neither selection endpoint completes work or sends a bot report.
 Expired selections are excluded from summaries even when the app is closed.
 Completion takes `{"completed":true}` or false and preserves selection and details.
-Completed reminders remain editable/reopenable in their own list; ordinary-task
-archive rules do not apply. All operations are scoped to authenticated ownership.
+Completed reminders remain editable/reopenable until 02:00 after their due date
+in the saved timezone. `maintenance::expire_completed_reminders` deletes them
+and their cascading offer links at that boundary, using Rust calendar/DST rules.
+The 30-second worker sweep and user-scoped reminder listing both run cleanup,
+including overdue completed reminders after downtime and reminders never selected
+for today. Unfinished reminders remain stored and visible. Ordinary-task archive
+rules do not apply. All operations are scoped to authenticated ownership.
 
 `dao::maintenance::prepare_reminders_at` joins the same owner/timezone/reset
 morning groups as existing offers. Reminder calendar dates use the saved timezone,
@@ -555,8 +560,9 @@ groups send plain informational messages without Yes/No buttons. The event date'
 Yes selects only today's linked, still-owned, unfinished, unchanged reminders.
 No never selects reminders. Tomorrow's notices are never accepted by today's Yes.
 Accepted reminders join daily summaries under ⏰ Reminders and expire at the
-following calendar day's 02:00; removal/expiry never clears completion or deletes
-the reminder. They never recur or carry over, and there is no alert at event time.
+following calendar day's 02:00; removal preserves the reminder and completion.
+At expiry, completed reminders are deleted; unfinished reminders remain.
+They never recur or carry over, and there is no alert at event time.
 
 Links snapshot exact instant/timezone. Rescheduling clears selection, preserves
 completion, and invalidates old buttons; description-only edits preserve selection.
@@ -570,7 +576,8 @@ Migration `0016_missed_reminders.sql` caps existing daily reminder selections;
 backend manual selection and morning acceptance enforce the same event date's
 following local 02:00 boundary after migration 0018, including DST. Reminder API
 responses expose expired selections as `expires_at: null` immediately; the worker
-also clears expired selection storage, preserving the reminder and its progress.
+also clears expired selection storage, preserving unfinished reminders and deleting
+completed reminders past their due date's following 02:00 boundary.
 At the next date's 08:00, morning messages include an informational note naming
 yesterday's unfinished reminders, including ones not accepted into the daily list.
 Durable `yesterday` offer links reuse delivery leases and sent-state deduplication.

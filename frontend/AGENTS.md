@@ -61,10 +61,13 @@ standalone browser.
   reminders, then offers same-day daily-list inclusion at 08:00 on their calendar
   date (including events before 02:00). Accepted reminders show exact saved-zone
   time and a Reminder badge in Tasks of the day; completion updates the original
-  reminder and resends the current summary. Removing/expiring a daily pick keeps
-  reminder/progress. Reminders refresh with scheduled work every 30 seconds and on
-  focus; an independent timer clears expired selection. Completed/past reminders
-  stay in their own tab and can be edited, reopened or deleted. Rescheduling clears
+  reminder and resends the current summary. Removing a daily pick keeps the
+  reminder/progress; expiry preserves unfinished reminders. Reminders refresh with
+  scheduled work every 30 seconds and on
+  focus; an independent timer clears expired selection. Completed reminders can be
+  reopened until 02:00 after their due date in the saved timezone, then backend
+  cleanup deletes them; the next 30-second/focus refresh removes them from the tab.
+  Unfinished past reminders stay visible. Rescheduling clears
   selection, preserves completion and invalidates old buttons. No event-time alert.
 - Scheduled tasks tab manages category-free recurring tasks with description,
   ordered subtask templates, required weekday selection, and saved IANA

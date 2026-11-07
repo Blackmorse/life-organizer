@@ -186,10 +186,13 @@ bot lists tomorrow's reminders (informational only); at 08:00 on the event date
 it offers them alongside scheduled work and carryover with the existing Yes/No
 buttons. Notices also send without other daily work. Exact time appears in bot
 messages and UI. Acceptance adds reminders until the following calendar day's
-02:00; completion updates the reminder and daily expiry/removal preserves it.
+02:00; completion updates the reminder, and daily removal preserves it.
 Reminders never recur or carry over. Rescheduling clears daily selection and old
-buttons cannot select changed dates/timezones. Completed reminders remain in their
-own tab and can be reopened. No separate event-time alert is sent.
+buttons cannot select changed dates/timezones. Completed reminders can be reopened
+until 02:00 after their due date in the saved timezone, then are automatically
+deleted from their tab and storage. Unfinished reminders remain. Cleanup runs in
+the background and on reminder listing, including after downtime.
+No separate event-time alert is sent.
 Reminder selection expires at the following calendar day's 02:00 in its saved
 timezone, whether completed or not. The next 08:00 morning message includes an
 informational note naming yesterday's unfinished reminders, without offering to

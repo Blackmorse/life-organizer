@@ -17,6 +17,35 @@ pub async fn now(connection: &mut PgConnection) -> Result<DateTime<Utc>, sqlx::E
         .await
 }
 
+/// Delete completed reminders at 02:00 after their saved-zone event date.
+/// Lock rows so reopening or rescheduling cannot race with the cleanup decision.
+pub async fn expire_completed_reminders(
+    connection: &mut PgConnection,
+    owner: Option<i64>,
+    instant: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(i64, DateTime<Utc>, String)> = sqlx::query_as(
+        "SELECT id,due_at,timezone FROM reminder_tasks
+         WHERE completed AND ($1::bigint IS NULL OR user_id=$1) AND due_at <= $2
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(owner)
+    .bind(instant)
+    .fetch_all(&mut *connection)
+    .await?;
+    for (id, event, timezone) in rows {
+        let zone = self::timezone(&timezone)?;
+        let next_day = event.with_timezone(&zone).date_naive().succ_opt().unwrap();
+        if planning::at(zone, next_day, 2) <= instant {
+            sqlx::query("DELETE FROM reminder_tasks WHERE id=$1")
+                .bind(id)
+                .execute(&mut *connection)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn offer(
     connection: &mut PgConnection,
     owner: i64,
