@@ -193,7 +193,13 @@ buttons cannot select changed dates/timezones. Completed reminders can be reopen
 until 02:00 after their due date in the saved timezone, then are automatically
 deleted from their tab and storage. Unfinished reminders remain. Cleanup runs in
 the background and on reminder listing, including after downtime.
-No separate event-time alert is sent.
+Unfinished reminders send independent bot alerts, even when not selected for today:
+timed work one elapsed hour before its due instant; all-day work at 21:00, 23:00,
+and 23:55 on its saved-zone calendar date. The 30-second worker sweep uses durable
+delivery state and one-minute retry leases. Completion, deletion, and rescheduling
+are rechecked before each attempt. Restart catches up only the current alert window
+(until the next all-day slot/midnight, or the timed due instant), never a burst of
+expired alerts. Migration `0020_reminder_alerts.sql` adds delivery storage.
 Reminder selection expires at the following calendar day's 02:00 in its saved
 timezone, whether completed or not. The next 08:00 morning message includes an
 informational note naming yesterday's unfinished reminders, without offering to

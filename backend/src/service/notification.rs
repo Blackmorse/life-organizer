@@ -1,6 +1,34 @@
 use crate::domain::{DailyTaskSource, DailyTaskSummary};
 use async_trait::async_trait;
 
+pub(crate) fn reminder_alert_messages(
+    alert: &crate::dao::reminder_alert::ReminderAlert,
+) -> Vec<String> {
+    let zone = crate::planning::zone(&alert.timezone).expect("validated saved timezone");
+    let local = alert.due_at.with_timezone(&zone);
+    let mut html = HtmlMessages::default();
+    html.append("⏰ Reminder: unfinished task", true);
+    html.append("\n\n", false);
+    html.append(&alert.description, true);
+    html.append("\n", false);
+    let due = if alert.all_day {
+        format!(
+            "Due today — {} · All day ({})",
+            local.format("%Y-%m-%d"),
+            alert.timezone
+        )
+    } else {
+        format!(
+            "Due {} ({})",
+            local.format("%Y-%m-%d %H:%M"),
+            alert.timezone
+        )
+    };
+    html.append(&due, false);
+    html.flush();
+    html.messages
+}
+
 pub(super) fn backlog_messages(items: &[crate::domain::BacklogTask]) -> Vec<String> {
     if items.is_empty() {
         return Vec::new();

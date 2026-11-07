@@ -69,6 +69,7 @@ plans. PostgreSQL is the chosen relational database for persistent storage.
 | `src/planning.rs` | IANA timezone validation and local-calendar reset/offer rules, including DST wall-time resolution. |
 | `src/dao/scheduled.rs`, `src/service/scheduled.rs`, `src/api/scheduled.rs` | Recurring templates, daily snapshots, validation, ownership, and scheduled-task routes. |
 | `src/dao/reminder.rs`, `src/service/reminder.rs`, `src/api/reminder.rs` | One-time reminders, required date/optional time validation, owned CRUD, completion, and daily removal. |
+| `src/reminder_alerts.rs`, `src/dao/reminder_alert.rs` | Independent reminder-alert delivery, durable schedule identities, live filtering, and retry leases. |
 | `src/service/notification.rs` | Transport-independent message sender boundary and daily summary formatting. |
 | `src/api/auth.rs` | Authentication middleware, user registration, and per-user service wiring. |
 | `src/db.rs` | Create the PostgreSQL pool and apply migrations; reused by tests. |
@@ -570,6 +571,32 @@ Accepted reminders join daily summaries under ⏰ Reminders and expire at the
 following calendar day's 02:00; removal preserves the reminder and completion.
 At expiry, completed reminders are deleted; unfinished reminders remain.
 They never recur or carry over, and there is no alert at event time.
+
+Independent bot alerts remind users of unfinished work regardless of daily
+selection or morning-offer decisions. Timed reminders alert one elapsed hour
+before `due_at`, including across midnight/DST. All-day reminders alert at saved-zone
+21:00, 23:00, and 23:55 on their calendar date. `planning::reminder_alert_window`
+owns these rules and shared DST wall-time resolution. No frontend must remain open.
+
+Migration `0020_reminder_alerts.sql` adds `reminder_alerts`, keyed by reminder,
+exact due instant, timezone, all-day mode, and slot. It preserves existing reminder
+data and daily/morning state. Delivery uses the elected worker's 30-second sweep,
+independently of morning delivery failures. Each attempt locks/rechecks the live
+reminder's identity, ownership, completion, and current description, then commits
+a one-minute lease before sending. Successful delivery persists `sent`; failures
+retry after the lease without blocking other recipients. Deletion cascades jobs;
+rescheduling/timezone/mode changes invalidate old snapshots. Description-only edits
+do not re-alert an already-sent slot. Identical saved schedule identities retain
+their sent history, including after completion/reopening or moving away and back.
+No selection or progress changes are made by alerts. Detailed notes are excluded;
+names are HTML-escaped and long messages use the existing Telegram splitter.
+
+Each all-day window ends at the next slot, with the last ending at midnight
+(not daily-selection expiry at 02:00); timed alerts expire at `due_at`. Downtime
+or creation during a window sends only that window's alert, without backfilling
+earlier slots or past dates. Retries stop at the same boundary. Ambiguous network
+failure/crash after Telegram delivery can still duplicate an alert. Restart the
+backend to apply the migration; existing unfinished reminders become eligible.
 
 Date-only reminders show their date and `All day` instead of an artificial time
 in morning messages, daily summaries, and assistant daily listings. The same

@@ -65,3 +65,4 @@ fn validate_id(id: i64) -> Result<(), ServiceError> {
     }
 }
 pub(crate) use notification::morning_messages;
+pub(crate) use notification::reminder_alert_messages;

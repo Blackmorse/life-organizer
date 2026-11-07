@@ -266,6 +266,18 @@ pub async fn run(
                     let mut sweeps = tokio::time::interval(Duration::from_secs(30));
                     loop {
                         sweeps.tick().await;
+                        // Alert and morning failures are independent; neither
+                        // should starve the other's delivery queue.
+                        if crate::reminder_alerts::deliver_at(
+                            &worker.pool,
+                            worker.bot.as_ref(),
+                            chrono::Utc::now(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            eprintln!("Reminder alert delivery failed; will retry valid alerts.");
+                        }
                         if worker.deliver_due().await.is_err() {
                             eprintln!("Morning offer delivery failed; will retry pending offers.");
                         }

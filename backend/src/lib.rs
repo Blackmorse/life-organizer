@@ -8,6 +8,7 @@ pub mod db;
 pub mod domain;
 pub mod morning;
 pub mod planning;
+pub mod reminder_alerts;
 pub mod service;
 pub mod speech;
 pub mod task_assistant;

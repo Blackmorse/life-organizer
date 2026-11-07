@@ -14,7 +14,8 @@ through without losing sight of longer-term work.
   tomorrow, and decide whether to carry unfinished work forward.
 - **Keep routines and dates in view:** Set recurring tasks and one-time reminders
   alongside your everyday work. Reminders can have a specific time or be due
-  anytime during their chosen day.
+  anytime during their chosen day. Unfinished reminders trigger bot alerts: one
+  hour before a set time, or at 21:00, 23:00, and 23:55 for all-day work.
 - **Track progress:** Complete tasks and steps, with finished tasks kept in an
   archive.
 - **Stay connected through Telegram:** Receive daily summaries and morning

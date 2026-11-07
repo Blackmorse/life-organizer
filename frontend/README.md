@@ -28,7 +28,9 @@ React + TypeScript + Vite + Material UI app for the Rust backend in `../backend`
   to include them in **Tasks of the day** alongside other morning suggestions.
   **Yes** adds today's reminders; **No** leaves them out. Tomorrow's notice is
   informational only. Messages also send when no other work is due. No additional
-  alert is sent at the event time. Dates follow calendar days even for events before
+  alert is sent at the event time. Unfinished timed reminders alert **one hour before**;
+  all-day reminders alert at **21:00, 23:00, and 23:55** in their saved timezone,
+  even if not added to Tasks of the day. Dates follow calendar days even for events before
   2:00 AM. Accepted reminders show a **Reminder** badge and saved-zone date with optional time;
   progress is saved to the original and included under **⏰ Reminders** in bot lists.
   Daily picks expire at **2:00 AM the next calendar day** without deleting reminders

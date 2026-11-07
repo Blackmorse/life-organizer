@@ -66,3 +66,27 @@ pub fn morning_schedule(zone: Tz, reset: DateTime<Utc>) -> (DateTime<Utc>, DateT
     let day = reset.with_timezone(&zone).date_naive();
     (at(zone, day, 8), at(zone, day.succ_opt().unwrap(), 2))
 }
+
+/// Only the current alert window is actionable after downtime. Each all-day
+/// slot ends at the next slot; the last ends at calendar midnight, not 02:00.
+pub fn reminder_alert_window(
+    zone: Tz,
+    due: DateTime<Utc>,
+    all_day: bool,
+    now: DateTime<Utc>,
+) -> Option<(i16, DateTime<Utc>, DateTime<Utc>)> {
+    if !all_day {
+        let start = due - Duration::hours(1);
+        return (start <= now && now < due).then_some((0, start, due));
+    }
+    let day = due.with_timezone(&zone).date_naive();
+    let times = [
+        at(zone, day, 21),
+        at(zone, day, 23),
+        local_instant(zone, day.and_hms_opt(23, 55, 0).unwrap()),
+        at(zone, day.succ_opt().unwrap(), 0),
+    ];
+    times.windows(2).enumerate().find_map(|(index, pair)| {
+        (pair[0] <= now && now < pair[1]).then_some((index as i16 + 1, pair[0], pair[1]))
+    })
+}
