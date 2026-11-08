@@ -60,14 +60,14 @@ export function Subtasks({ taskId, subtasks, disabled, readOnly = false, mode = 
         mb: 0.5, display: 'grid', gridTemplateColumns: '3ch minmax(0, 1fr)', columnGap: 0.5, counterIncrement: 'subtask',
         '&::before': { content: 'counter(subtask) "."', typography: 'body2', color: 'text.secondary', pt: '9px', textAlign: 'right' },
       }}>
-        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          {!readOnly && draft?.index === index ? editor : <Box sx={{ flex: 1, minWidth: 0 }}><FormControlLabel label={step.description} sx={{ m: 0, alignItems: 'flex-start' }}
+        <Stack spacing={0.5} sx={{ minWidth: 0 }}>
+          {!readOnly && draft?.index === index ? editor : <Box sx={{ minWidth: 0 }}><FormControlLabel label={step.description} sx={{ m: 0, alignItems: 'flex-start' }}
             slotProps={{ typography: { variant: 'body2', sx: { pt: '9px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textDecoration: step.completed ? 'line-through' : undefined } } }}
             control={<Checkbox size="small" checked={step.completed} disabled={actionsDisabled || readOnly || mode === 'template'}
               slotProps={{ input: { 'aria-label': `Subtask ${index + 1}: ${step.description}` } }}
               onChange={(_, completed) => void onSave(subtasks.map((item, position) => position === index ? { ...item, completed } : item))} />} />
             <DetailedDescription text={step.detailed_description} /></Box>}
-          {!readOnly && <Stack direction="row" sx={{ flexShrink: 0 }}>
+          {!readOnly && <Stack direction="row" sx={{ flexWrap: 'wrap' }}>
             {mode === 'task' && <DailyPickButton taskId={taskId} step={step} index={index} label={step.description} disabled={actionsDisabled} />}
             <IconButton size="small" aria-label={`Move subtask ${index + 1} up`} disabled={actionsDisabled || index === 0} onClick={() => move(index, -1)}><ArrowUpwardIcon fontSize="small" /></IconButton>
             <IconButton size="small" aria-label={`Move subtask ${index + 1} down`} disabled={actionsDisabled || index === subtasks.length - 1} onClick={() => move(index, 1)}><ArrowDownwardIcon fontSize="small" /></IconButton>

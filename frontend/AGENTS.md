@@ -142,7 +142,9 @@ standalone browser.
   focused text input immediately; a pencil on each row edits its description
   inline. Save subtask saves the change; Cancel discards it. Failed saves preserve
   typed text. Each row has a cross for immediate deletion and up/down reorder
-  controls. Other list mutations are disabled while an add/edit draft is open.
+  controls. Scheduling, reorder, edit, and delete buttons sit on a separate row
+  below the description so text and inline editors retain full width on mobile.
+  Other list mutations are disabled while an add/edit draft is open.
 - Subtask completion checkboxes save immediately in read view, with progress counts
   and completed steps still visible. Completion flags stay with their steps when
   descriptions change or steps are reordered. A nonempty fully completed list automatically
