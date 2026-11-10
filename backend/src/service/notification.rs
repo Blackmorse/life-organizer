@@ -73,6 +73,92 @@ pub(super) fn backlog_messages(items: &[crate::domain::BacklogTask]) -> Vec<Stri
 #[async_trait]
 pub trait MessageSender: Send + Sync {
     async fn send(&self, recipient: i64, messages: &[String]) -> Result<(), NotificationError>;
+
+    async fn send_notifications(
+        &self,
+        recipient: i64,
+        messages: &[NotificationMessage],
+    ) -> Result<(), NotificationError> {
+        let text = messages
+            .iter()
+            .map(|message| message.text.clone())
+            .collect::<Vec<_>>();
+        self.send(recipient, &text).await
+    }
+}
+
+/// HTML content with optional, copy-only actions. Copying never mutates work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationMessage {
+    pub text: String,
+    pub copy_buttons: Vec<CopyButton>,
+}
+
+impl From<String> for NotificationMessage {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            copy_buttons: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for NotificationMessage {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyButton {
+    pub label: String,
+    pub text: String,
+}
+
+pub(super) fn daily_notifications(items: &[DailyTaskSummary]) -> Vec<NotificationMessage> {
+    let mut messages = daily_messages(items)
+        .into_iter()
+        .map(NotificationMessage::from)
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return messages;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for item in items {
+        if seen.insert((item.source, item.category_id, item.task_id)) {
+            append_copy_button(&mut messages, &item.task, &item.task);
+        }
+        if let Some(step) = &item.subtask {
+            append_copy_button(&mut messages, &format!("{} › {step}", item.task), step);
+        }
+    }
+    messages
+}
+
+fn append_copy_button(messages: &mut Vec<NotificationMessage>, label: &str, text: &str) {
+    // Never silently copy a shortened name. Full descriptions remain in the HTML.
+    if text.is_empty() || text.encode_utf16().count() > 256 {
+        return;
+    }
+    if messages.last().unwrap().copy_buttons.len() == 20 {
+        messages.push("Copy task/subtask names (continued)".into());
+    }
+    let single_line = format!(
+        "📋 {}",
+        label.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    let mut label = String::new();
+    for c in single_line.chars() {
+        if label.encode_utf16().count() + c.len_utf16() > 79 {
+            label.push('…');
+            break;
+        }
+        label.push(c);
+    }
+    messages.last_mut().unwrap().copy_buttons.push(CopyButton {
+        label,
+        text: text.into(),
+    });
 }
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -264,6 +350,84 @@ impl HtmlMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_copy_buttons_keep_exact_names_and_distinct_parent_identities() {
+        let item = |source, task_id, subtask: Option<&str>| DailyTaskSummary {
+            source,
+            task_id,
+            category_id: (source == DailyTaskSource::Ordinary).then_some(1),
+            category: "Work".into(),
+            task: "Build <&>\n😀".into(),
+            subtask: subtask.map(String::from),
+            completed: false,
+        };
+        let items = [
+            item(DailyTaskSource::Ordinary, 1, Some("Ship <&>\n😀")),
+            item(DailyTaskSource::Ordinary, 1, Some("Verify")),
+            item(DailyTaskSource::Ordinary, 2, None),
+            item(DailyTaskSource::Scheduled, 1, Some("Warm up")),
+            item(DailyTaskSource::Reminder, 1, None),
+        ];
+        let messages = daily_notifications(&items);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, daily_messages(&items)[0]);
+        let buttons = &messages[0].copy_buttons;
+        assert_eq!(buttons.len(), 7);
+        assert_eq!(buttons[0].text, "Build <&>\n😀");
+        assert_eq!(buttons[1].text, "Ship <&>\n😀");
+        assert!(buttons[1].label.contains("› Ship"));
+        assert!(buttons.iter().all(|button| !button.label.contains('\n')));
+        assert!(daily_notifications(&[]).is_empty());
+    }
+
+    #[test]
+    fn daily_copy_keyboards_are_bounded_and_never_copy_truncated_names() {
+        let mut items = (0..45)
+            .map(|id| DailyTaskSummary {
+                source: DailyTaskSource::Ordinary,
+                task_id: id,
+                category_id: Some(1),
+                category: "Home".into(),
+                task: format!("Task {id}"),
+                subtask: None,
+                completed: false,
+            })
+            .collect::<Vec<_>>();
+        items[0].task = "😀".repeat(128);
+        items[1].task = "😀".repeat(129);
+        let messages = daily_notifications(&items);
+        let buttons = messages
+            .iter()
+            .flat_map(|message| &message.copy_buttons)
+            .collect::<Vec<_>>();
+        assert_eq!(buttons.len(), 44);
+        assert_eq!(buttons[0].text, items[0].task);
+        assert!(buttons.iter().all(|button| button.text != items[1].task));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.text.contains(&items[1].task))
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.copy_buttons.len() <= 20)
+        );
+        assert!(
+            buttons
+                .iter()
+                .all(|button| button.label.encode_utf16().count() <= 80)
+        );
+        assert!(buttons[0].label.ends_with('…'));
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.text.matches("Progress today:").count())
+                .sum::<usize>(),
+            1
+        );
+    }
 
     #[test]
     fn morning_sections_share_one_message_with_unambiguous_final_choice() {

@@ -1,4 +1,8 @@
-use super::{MessageSender, ServiceError, notification::daily_messages, validate_id};
+use super::{
+    MessageSender, NotificationMessage, ServiceError,
+    notification::{daily_messages, daily_notifications},
+    validate_id,
+};
 use crate::{dao::DailyDao, domain::DailyTask};
 use std::sync::Arc;
 
@@ -39,13 +43,13 @@ impl DailyService {
         recipient: i64,
         sender: &dyn MessageSender,
     ) -> Result<(), ServiceError> {
-        let messages = self.current_messages().await?;
+        let messages = self.current_notifications().await?;
         if messages.is_empty() {
             return Err(ServiceError::InvalidInput(
                 "Add tasks or subtasks to Tasks of the day before finalizing.",
             ));
         }
-        sender.send(recipient, &messages).await?;
+        sender.send_notifications(recipient, &messages).await?;
         Ok(())
     }
     pub async fn current_messages(&self) -> Result<Vec<String>, ServiceError> {
@@ -55,6 +59,9 @@ impl DailyService {
         } else {
             daily_messages(&items)
         })
+    }
+    pub async fn current_notifications(&self) -> Result<Vec<NotificationMessage>, ServiceError> {
+        Ok(daily_notifications(&self.dao.summary().await?))
     }
     pub fn new(dao: Arc<dyn DailyDao>) -> Self {
         Self { dao }
