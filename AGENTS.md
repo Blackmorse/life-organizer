@@ -294,12 +294,6 @@ Daily bot reports end with completed/total selected work and a ten-cell text
 progress bar with percentage. Selected tasks and subtasks each count once;
 context-only parent headings do not count. Finalization, `/today`, and completion
 reports share this footer, shown once after the full list.
-Daily reports also attach one-tap copy buttons for task and selected subtask names,
-including context-only parent tasks. Copying preserves the exact plain-text name;
-users can paste it into a completion request. Telegram's 256 UTF-16-unit copy limit
-means longer names remain visible without copy buttons. Large keyboards split into
-20-row continuation messages. Finalization, `/today`, and assistant daily reports
-share this behavior.
 At 08:00, the bot offers unfinished picks from the previous daily list with Yes/No
 buttons. Yes restores only still-unfinished owned work, without duplicating current
 picks; No dismisses the offer. Offers expire at the next local 02:00. The backend

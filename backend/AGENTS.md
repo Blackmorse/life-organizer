@@ -245,19 +245,9 @@ counts once across ordinary, scheduled, and reminder work; context-only parent
 headings do not count. The footer appears once at the end, including when the report
 spans multiple messages, and is shared by finalization, `/today`, and completion
 reports. Morning offers do not show daily progress.
-Daily summaries attach native `copy_text` buttons for each task (including context
-parents) and selected subtask. Buttons copy exact plain-text names, without status
-marks; subtask labels include the parent for context. This applies to finalization,
-`/today`, and text/voice completion, selection, and move reports. Copying does not
-complete work; paste the name into an explicit completion request. Names exceeding
-256 UTF-16 units remain fully visible but have no copy button, avoiding silent
-truncation. Labels are single-line and capped at 80 UTF-16 units. Keyboards attach
-to the last summary chunk, with at most 20 rows per message; extra buttons use
-separate continuation messages. `NotificationMessage` carries copy actions through
-the service/assistant boundary to `MessageSender::send_notifications`.
-Morning offers share the same category/task hierarchy and retain their Yes/No
-buttons. All descriptions are HTML-escaped, including multiline category names.
-The adapter uses `parse_mode: "HTML"`. Long summaries split at 4096 rendered UTF-16 units,
+Morning offers share the same category/task hierarchy. All descriptions are
+HTML-escaped, including multiline category names. The adapter uses `parse_mode: "HTML"`
+without inline keyboards. Long summaries split at 4096 rendered UTF-16 units,
 preserving full descriptions with balanced tags and intact entities.
 Empty/expired lists return `400` without sending. Unstarted/blocked bot chats return
 `400` with Start/unblock guidance; other delivery errors return sanitized `502`.

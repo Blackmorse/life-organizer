@@ -1,7 +1,7 @@
 //! Outbound Telegram transport. Never expose/log URLs: they contain the bot token.
 mod morning;
 mod voice;
-use crate::service::{MessageSender, NotificationError, NotificationMessage};
+use crate::service::{MessageSender, NotificationError};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::time::Duration;
@@ -40,28 +40,13 @@ struct TelegramResponse {
 #[async_trait]
 impl MessageSender for TelegramSender {
     async fn send(&self, recipient: i64, messages: &[String]) -> Result<(), NotificationError> {
-        let messages = messages
-            .iter()
-            .cloned()
-            .map(NotificationMessage::from)
-            .collect::<Vec<_>>();
-        self.send_notifications(recipient, &messages).await
-    }
-
-    async fn send_notifications(
-        &self,
-        recipient: i64,
-        messages: &[NotificationMessage],
-    ) -> Result<(), NotificationError> {
-        for (index, message) in messages.iter().enumerate() {
-            let mut body = serde_json::json!({"chat_id": recipient, "text": message.text, "parse_mode": "HTML"});
-            if !message.copy_buttons.is_empty() {
-                body["reply_markup"] = serde_json::json!({"inline_keyboard": message.copy_buttons.iter().map(|button| vec![serde_json::json!({"text": button.label, "copy_text": {"text": button.text}})]).collect::<Vec<_>>()});
-            }
+        for (index, text) in messages.iter().enumerate() {
             let response = self
                 .client
                 .post(&self.endpoint)
-                .json(&body)
+                .json(
+                    &serde_json::json!({"chat_id": recipient, "text": text, "parse_mode": "HTML"}),
+                )
                 .send()
                 .await
                 .map_err(|_| NotificationError::DeliveryFailed)?;
@@ -278,36 +263,6 @@ mod tests {
                     {"command":"start","description":"Get started with Scheduler"}
                 ]
             })
-        );
-    }
-
-    #[tokio::test]
-    async fn sends_native_copy_buttons_without_callbacks_and_preserves_plain_messages() {
-        let bot = FakeBot::new(vec![(StatusCode::OK, json!({"ok":true})); 2]).await;
-        bot.sender
-            .send_notifications(
-                123,
-                &[
-                    "Completed".into(),
-                    NotificationMessage {
-                        text: "<b>Tasks for today are ready!</b>".into(),
-                        copy_buttons: vec![crate::service::CopyButton {
-                            label: "📋 Build › Ship".into(),
-                            text: "Ship <&>\n😀".into(),
-                        }],
-                    },
-                ],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            *bot.state.requests.lock().unwrap(),
-            vec![
-                json!({"chat_id":123,"text":"Completed","parse_mode":"HTML"}),
-                json!({"chat_id":123,"text":"<b>Tasks for today are ready!</b>","parse_mode":"HTML","reply_markup":{"inline_keyboard":[[
-                    {"text":"📋 Build › Ship","copy_text":{"text":"Ship <&>\n😀"}}
-                ]]}}),
-            ]
         );
     }
 

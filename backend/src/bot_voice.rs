@@ -82,12 +82,9 @@ async fn send_reply(
     bot: &dyn MorningBot,
     reply: AssistantReply,
 ) -> Result<(), NotificationError> {
-    let mut messages = text_messages(&reply.text)
-        .into_iter()
-        .map(crate::service::NotificationMessage::from)
-        .collect::<Vec<_>>();
+    let mut messages = text_messages(&reply.text);
     messages.extend(reply.daily_messages);
-    bot.send_notifications(sender, &messages).await
+    bot.send(sender, &messages).await
 }
 
 fn plain_reply(text: String) -> AssistantReply {

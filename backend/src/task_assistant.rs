@@ -82,7 +82,7 @@ pub struct AssistantReply {
     /// Plain text; the Telegram boundary escapes it.
     pub text: String,
     /// Already formatted and split by the shared daily-summary service.
-    pub daily_messages: Vec<crate::service::NotificationMessage>,
+    pub daily_messages: Vec<String>,
 }
 
 #[async_trait]
@@ -156,7 +156,7 @@ async fn reply_with_daily_summary(
     };
     if changed {
         // Resolve after the committed mutation, never from the model's old list.
-        match daily.current_notifications().await {
+        match daily.current_messages().await {
             Ok(messages) if messages.is_empty() => {
                 reply.text.push_str("\nNo tasks currently in Tasks of the day.");
             }
@@ -844,14 +844,9 @@ mod tests {
             reply_with_daily_summary(("Completed: Deploy backend".into(), true), &daily).await;
         assert_eq!(
             reply.daily_messages,
-            daily.current_notifications().await.unwrap()
+            daily.current_messages().await.unwrap()
         );
-        let summary = reply
-            .daily_messages
-            .iter()
-            .map(|message| message.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let summary = reply.daily_messages.join("\n");
         assert!(summary.contains("✅"));
         assert!(summary.contains("Work &amp; home"));
         assert!(summary.contains("Release &lt;app&gt;"));

@@ -8,7 +8,7 @@ mod reminder;
 pub use reminder::ReminderService;
 mod notification;
 pub use daily::{DailyPlanningService, DailyService};
-pub use notification::{CopyButton, MessageSender, NotificationError, NotificationMessage};
+pub use notification::{MessageSender, NotificationError};
 mod scheduled;
 mod task;
 pub use scheduled::ScheduledService;

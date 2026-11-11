@@ -53,12 +53,11 @@ impl BotCommands {
             Some("/today") => {
                 let user = PgUserDao::new(self.pool.clone()).get_or_create(message.sender).await?;
                 let daily = DailyService::new(Arc::new(PgDailyDao::new(self.pool.clone(), user.id)));
-                let messages = daily.current_notifications().await?;
+                let messages = daily.current_messages().await?;
                 if messages.is_empty() {
                     vec!["No tasks in Tasks of the day yet. Use /morning to show an unanswered morning offer, or open the Mini App to add tasks. Use /today to check again.".into()]
                 } else {
-                    sender.send_notifications(message.sender, &messages).await?;
-                    return Ok(());
+                    messages
                 }
             }
             Some("/remind") => {
